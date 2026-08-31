@@ -70,6 +70,10 @@ class MapRecord(Base):
     paper_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     relative_path: Mapped[str] = mapped_column(String(1024), unique=True, nullable=False)
     content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    import_idempotency_key: Mapped[str | None] = mapped_column(
+        String(255), unique=True, nullable=True
+    )
+    import_request_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     extra_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -78,6 +82,11 @@ class MapRecord(Base):
     games: Mapped[list[GameRecord]] = relationship(
         back_populates="map", passive_deletes=True
     )
+
+    @property
+    def resource_pack(self) -> dict[str, Any] | None:
+        value = self.extra_metadata.get("resource_pack")
+        return value if isinstance(value, dict) else None
 
 
 class GameRecord(Base):

@@ -132,7 +132,26 @@ Idempotency-Key: <客户端生成的唯一值>
 - `paper_build`：固定 Paper build；
 - `java_major`：Java 主版本，默认 17；
 - `paper_url` 与 `paper_sha256`：可选的成对自定义制品；
+- `resource_pack`：可选的单个玩家资源包 ZIP；
+- `resource_pack_required`：玩家拒绝资源包时是否拒绝进入，默认 false；
+- `resource_pack_prompt`：可选原生下载提示，最多 256 字符；
 - 其他文件字段：随地图保存的资源文件。
+
+玩家资源包必须在 ZIP 根目录包含有效 `pack.mcmeta`，压缩包最多 250 MiB。后端计算
+Minecraft 协议使用的 SHA-1 和内部校验用 SHA-256，随后写入 `resource-pack`、
+`resource-pack-sha1`、`require-resource-pack` 及可选 `resource-pack-prompt`。上传地图自带的
+旧资源包 URL 会被清除，避免继承不受信任的外链。原生协议一次只支持一个资源包，系统
+不会自动合并多个 ZIP。
+
+下载端点为 `GET /resource-packs/maps/{map_id}/{sha1}/{filename}`。该端点故意位于
+`/api` 外且不要求管理 Token，否则 Minecraft 客户端无法下载；响应使用内容哈希 URL、
+一年 immutable 缓存、ETag 和 `nosniff`。除该下载路径外，管理 API 仍受 Bearer Token 保护。
+
+上传请求在 multipart 解析期间由 ASGI 中间件累计计数，超过文件总上限和协议开销预算时
+立即返回 413，避免超大请求先填满临时磁盘。上传完成后的解压、扫描与哈希在线程池中使用
+独立数据库 Session，不阻塞唯一的 API 事件循环。前端为同一次文件选择保存
+`Idempotency-Key`；网络结果未知后再次提交会复用该键，后端按内容指纹返回原 Map，避免
+重复导入数 GiB 数据。
 
 ### Game API
 
@@ -343,23 +362,52 @@ frps:30000 → frpc → WSL 127.0.0.1:30000 → Paper:25565
 
 启动和停止 Game 不修改 frpc 配置。只有管理员调整整个端口池时才验证并 reload。`remotePort` 位于 frps 主机，必须同时配置 frps `allowPorts`、操作系统防火墙和云安全组。
 
-当前 frpc 已安装并通过模板校验，但保持 disabled/inactive；填写真实 frps 地址与 `/etc/frp/client_token` 后再启用。
+frpc 模板保存在 `deploy/frp/frpc.toml.example`。执行 `scripts/init-config.sh` 后，在项目
+`config/frpc.toml` 中填写真实参数和 `auth.token`，再由安装脚本部署后启用。
+
+### 玩家资源包公网下载
+
+Paper 只把 `server.properties` 中的 URL 和 SHA-1 发送给玩家，不会把 WSL 本地 ZIP 直接
+传给客户端。需要先在项目 `config/mc-manager.env` 配置：
+
+```text
+MC_RESOURCE_PACK_BASE_URL=https://packs.example.com
+```
+
+该 URL 必须从玩家网络可访问，不能是 `127.0.0.1`。可在全局 frpc 中额外把本机 8080
+映射到 frps 的独立 HTTP 端口，再由公网已有的 HTTPS 反向代理仅将 `/resource-packs/`
+转发到该端口；示例已注释在 `deploy/frp/frpc.toml.example`。修改后重新运行安装脚本同步
+配置并重启 API，然后重新导入带资源包的 Map。已经导入的 Map 是不可变的，不会改写旧 URL。
+
+可先从玩家所在网络打开 Map 详情中的“测试下载”。若下载失败，应先修复 DNS、HTTPS、
+FRP、防火墙或反向代理，而不是关闭 SHA-1 校验。下载端点匿名公开，因此资源包中不得放置
+任何密钥或私有文件。
 
 ## 10. WSL 部署
 
 启用 systemd 后执行：
 
 ```bash
+bash scripts/init-config.sh
+# 直接编辑项目 config/mc-manager.env 和 config/frpc.toml
+bash scripts/build-frontend.sh
 sudo bash scripts/install-wsl.sh
 ```
 
-脚本安装 Python venv、rootless Podman 组件和固定校验的 frpc，创建服务账户、subuid/subgid、目录、随机 API token 和 systemd 单元。
+初始化脚本根据 Git 中的 `.env.example` 和 `deploy/frp/frpc.toml.example` 生成被忽略的
+项目 `config/`，并生成随机 API Token。安装脚本安装 Python venv、rootless Podman 组件、
+固定校验的 frpc、服务账户、subuid/subgid、数据目录和 systemd 单元，并将实际配置部署到
+`/opt/mc-manager/config/`。
 
 配置：
 
-- `/etc/mc-manager/mc-manager.env`
-- `/etc/frp/frpc.toml`
-- `/etc/frp/client_token`
+- 示例：`.env.example`、`deploy/frp/frpc.toml.example`
+- 实际唯一来源：`config/mc-manager.env`、`config/frpc.toml`
+- systemd 读取的部署副本：`/opt/mc-manager/config/`
+
+实际配置直接在项目中编辑，无需 `sudoedit`。修改后重新运行安装脚本同步受保护副本。
+不让 systemd 直接读取用户 Home 下的项目文件，因为服务使用 `ProtectHome=true`，且生产
+服务不应直接信任普通用户可随时改写的密钥文件。
 
 启用 API 与 Worker：
 
@@ -384,7 +432,45 @@ curl http://127.0.0.1:8080/healthz
 
 Windows 还需使用任务计划程序在无人登录的冷启动时唤醒指定 WSL 发行版。
 
-## 11. 当前验证状态
+## 11. 管理前端
+
+管理台使用 Vue 3、Vite 和 TypeScript，生产环境不增加 Web 服务：FastAPI 在同一端口
+提供 `/assets/*`、SPA 页面和 `/api/*`。前端所有请求使用相对 URL，因此无需 CORS。
+
+管理台的 `/help` 内置保姆级教程，覆盖 Ubuntu/WSL 首次安装、systemd、后端环境变量、
+全局 frpc、Map→Game→启动→停止→恢复的完整流程、地图压缩包要求和常见故障命令。
+地图上传窗口也会直接展示结构、安全和容量检查清单，避免管理员必须先查外部文档。
+
+一级页面只有概览、游戏、地图和任务：
+
+- 概览：运行 Game、端口余量、进行中和失败 Task；
+- 游戏：创建、启动、停止、删除，以及 Game 内部 Backup 时间线；
+- 地图：上传不可变 Map、查看运行版本、创建 Game 和安全删除；
+- 任务：显示最近 Task 的中文步骤、进度、结果和脱敏错误。
+
+`run_id` 不出现在界面。恢复 Backup 需要输入 `game_id` 二次确认；删除 Game 和 Backup
+同样使用危险确认。Bearer Token 仅保存到当前标签页的 `sessionStorage`，401 会立即清除。
+
+开发：
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+生产构建与检查：
+
+```bash
+bash scripts/build-frontend.sh
+```
+
+脚本会在依赖锁文件或 Node/npm 版本变化时执行 `npm ci`，然后依次运行测试、类型检查和
+Vite 构建，并将产物直接输出到 `src/mc_manager/static/`。FastAPI 只有在入口文件存在时才注册
+SPA fallback，因此没有前端产物的纯后端开发环境仍可启动。所有 `/api` 路径优先由 API
+处理，不会被前端 fallback 吞掉。
+
+## 12. 当前验证状态
 
 已验证：
 

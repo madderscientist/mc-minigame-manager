@@ -1,3 +1,4 @@
+import json
 import shutil
 import stat
 import zipfile
@@ -61,6 +62,80 @@ class SafeZipExtractor:
         except Exception:
             shutil.rmtree(destination, ignore_errors=True)
             raise
+
+    def validate_resource_pack(self, archive: Path) -> int:
+        if archive.stat().st_size > self.settings.max_resource_pack_bytes:
+            raise ValidationError(
+                "resource_pack_too_large", "客户端资源包不能超过 250 MiB"
+            )
+        try:
+            bundle = zipfile.ZipFile(archive)
+        except zipfile.BadZipFile as error:
+            raise ValidationError(
+                "resource_pack_invalid_zip", "客户端资源包不是有效的 ZIP"
+            ) from error
+        with bundle:
+            infos = bundle.infolist()
+            if len(infos) > self.settings.max_archive_files:
+                raise ValidationError("too_many_files", "资源包文件数量超过限制")
+            metadata_entries: list[zipfile.ZipInfo] = []
+            total = 0
+            for info in infos:
+                relative = self._validate_name(info.filename)
+                if info.flag_bits & 0x1:
+                    raise ValidationError(
+                        "encrypted_resource_pack", "客户端资源包不能包含加密文件"
+                    )
+                mode = info.external_attr >> 16
+                file_type = stat.S_IFMT(mode)
+                if file_type == stat.S_IFLNK:
+                    raise ValidationError("symlink_not_allowed", "资源包中禁止符号链接")
+                if file_type not in {0, stat.S_IFREG, stat.S_IFDIR}:
+                    raise ValidationError("special_file_not_allowed", "资源包中禁止特殊文件")
+                total += info.file_size
+                if total > self.settings.max_extracted_bytes:
+                    raise ValidationError("resource_pack_expanded_too_large", "资源包展开后过大")
+                ratio = (
+                    float("inf")
+                    if info.compress_size == 0 and info.file_size
+                    else info.file_size / max(info.compress_size, 1)
+                )
+                if ratio > self.settings.max_compression_ratio:
+                    raise ValidationError("compression_bomb", "资源包压缩比超过安全限制")
+                if relative.parts == ("pack.mcmeta",):
+                    metadata_entries.append(info)
+
+            if len(metadata_entries) != 1:
+                raise ValidationError(
+                    "resource_pack_metadata_invalid",
+                    "资源包 ZIP 根目录必须且只能包含一个 pack.mcmeta",
+                )
+            metadata_info = metadata_entries[0]
+            if metadata_info.file_size > 1024 * 1024:
+                raise ValidationError("resource_pack_metadata_too_large", "pack.mcmeta 过大")
+            try:
+                metadata = json.loads(bundle.read(metadata_info).decode("utf-8"))
+                pack_format = metadata["pack"]["pack_format"]
+            except (
+                KeyError,
+                TypeError,
+                RuntimeError,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                zipfile.BadZipFile,
+            ) as error:
+                raise ValidationError(
+                    "resource_pack_metadata_invalid", "pack.mcmeta 不是有效的资源包元数据"
+                ) from error
+            if (
+                not isinstance(pack_format, int)
+                or isinstance(pack_format, bool)
+                or pack_format < 1
+            ):
+                raise ValidationError(
+                    "resource_pack_metadata_invalid", "pack.pack_format 必须是整数"
+                )
+            return pack_format
 
     @staticmethod
     def validate_map_layout(directory: Path) -> None:

@@ -1,7 +1,10 @@
+import json
 import os
 import re
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 from sqlalchemy.orm import Session
 
@@ -13,25 +16,50 @@ from mc_manager.services.storage import Storage
 from mc_manager.services.versions import read_data_version
 
 SAFE_RESOURCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+RESOURCE_PACK_STORAGE_NAME = "resource-pack.zip"
+RESOURCE_PACK_PROPERTIES = {
+    "resource-pack",
+    "resource-pack-sha1",
+    "resource-pack-id",
+    "resource-pack-prompt",
+    "require-resource-pack",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ResourcePackImport:
+    path: Path
+    filename: str
+    sha1: str
+    sha256: str
+    size_bytes: int
+    required: bool
+    prompt: str | None
 
 
 class MapService:
-    def __init__(self, storage: Storage, extractor: SafeZipExtractor) -> None:
+    def __init__(
+        self,
+        storage: Storage,
+        extractor: SafeZipExtractor,
+        resource_pack_base_url: str | None = None,
+    ) -> None:
         self.storage = storage
         self.extractor = extractor
+        self.resource_pack_base_url = resource_pack_base_url
 
-    def import_repository(
+    def prepare_import(
         self,
         session: Session,
         *,
-        archive_path: Path,
-        resource_paths: list[Path],
         name: str,
         mc_version: str,
         paper_build: str,
         java_major: int,
         paper_url: str | None,
         paper_sha256: str | None,
+        idempotency_key: str | None,
+        request_hash: str,
     ) -> MapRecord:
         if not name.strip():
             raise ValidationError("name_required", "地图名称不能为空")
@@ -58,11 +86,24 @@ class MapService:
             paper_url=paper_url,
             paper_sha256=paper_sha256.lower() if paper_sha256 else None,
             relative_path="pending",
+            import_idempotency_key=idempotency_key,
+            import_request_hash=request_hash,
             extra_metadata={},
         )
         session.add(record)
         session.flush()
         record.relative_path = f"maps/{record.map_id}"
+        return record
+
+    def publish_import(
+        self,
+        session: Session,
+        record: MapRecord,
+        *,
+        archive_path: Path,
+        resource_paths: list[Path],
+        resource_pack: ResourcePackImport | None = None,
+    ) -> MapRecord:
         destination = self.storage.resolve(record.relative_path)
         staging = self.storage.staging_path(f"upload-map-{record.map_id}")
         try:
@@ -72,9 +113,15 @@ class MapService:
             self._normalize_server_root(staging)
             record.data_version = read_data_version(staging)
             resource_names = self._install_resources(staging, resource_paths)
+            resource_pack_metadata = self._install_resource_pack(
+                staging, record.map_id, resource_pack
+            )
             digest, _ = self.storage.tree_digest(staging)
             record.content_sha256 = digest
-            record.extra_metadata = {"resources": resource_names}
+            record.extra_metadata = {
+                "resources": resource_names,
+                "resource_pack": resource_pack_metadata,
+            }
             destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staging, destination)
             record.state = ResourceState.READY
@@ -127,6 +174,8 @@ class MapService:
                 if line and not line.lstrip().startswith("#") and "=" in line:
                     key, value = line.split("=", 1)
                     properties[key.strip()] = value.strip()
+        for key in RESOURCE_PACK_PROPERTIES:
+            properties.pop(key, None)
         properties["level-name"] = level_name
         properties["server-port"] = "25565"
         properties_path.write_text(
@@ -146,9 +195,79 @@ class MapService:
             name = source.name
             if not SAFE_RESOURCE_NAME.fullmatch(name):
                 raise ValidationError("resource_name_invalid", f"资源文件名不安全: {name}")
+            if name == RESOURCE_PACK_STORAGE_NAME:
+                raise ValidationError(
+                    "resource_name_reserved",
+                    f"普通附加资源不能使用保留文件名: {name}",
+                )
             target = resource_dir / name
             if target.exists():
                 raise ValidationError("resource_duplicate", f"资源文件重名: {name}")
             shutil.copy2(source, target)
             installed.append(name)
         return installed
+
+    def _install_resource_pack(
+        self,
+        staging: Path,
+        map_id: int,
+        resource_pack: ResourcePackImport | None,
+    ) -> dict[str, object] | None:
+        if resource_pack is None:
+            return None
+        metadata = self.describe_resource_pack(map_id, resource_pack)
+        resource_directory = staging / ".mc-manager-resources"
+        resource_directory.mkdir(mode=0o750, exist_ok=True)
+        target = resource_directory / RESOURCE_PACK_STORAGE_NAME
+        shutil.copy2(resource_pack.path, target)
+        properties_path = staging / "server.properties"
+        properties: dict[str, str] = {}
+        for line in properties_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line and not line.lstrip().startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                properties[key.strip()] = value.strip()
+        properties["resource-pack"] = str(metadata["url"])
+        properties["resource-pack-sha1"] = resource_pack.sha1
+        properties["require-resource-pack"] = str(resource_pack.required).lower()
+        if resource_pack.prompt:
+            properties["resource-pack-prompt"] = (
+                json.dumps(
+                    {"text": resource_pack.prompt},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).replace("\\", "\\\\")
+            )
+        properties_path.write_text(
+            "# Managed by mc-minigame-manager\n"
+            + "".join(f"{key}={value}\n" for key, value in sorted(properties.items())),
+            encoding="utf-8",
+        )
+        return metadata
+
+    def describe_resource_pack(
+        self, map_id: int, resource_pack: ResourcePackImport
+    ) -> dict[str, object]:
+        if self.resource_pack_base_url is None:
+            raise ValidationError(
+                "resource_pack_base_url_missing",
+                "后端未配置资源包公网地址, 暂时不能上传客户端资源包",
+            )
+        if not SAFE_RESOURCE_NAME.fullmatch(resource_pack.filename):
+            raise ValidationError(
+                "resource_pack_name_invalid", "客户端资源包文件名不安全"
+            )
+        pack_format = self.extractor.validate_resource_pack(resource_pack.path)
+        public_url = (
+            f"{self.resource_pack_base_url}/resource-packs/maps/{map_id}/"
+            f"{resource_pack.sha1}/{quote(resource_pack.filename)}"
+        )
+        return {
+            "filename": resource_pack.filename,
+            "sha1": resource_pack.sha1,
+            "sha256": resource_pack.sha256,
+            "size_bytes": resource_pack.size_bytes,
+            "pack_format": pack_format,
+            "required": resource_pack.required,
+            "prompt": resource_pack.prompt,
+            "url": public_url,
+        }

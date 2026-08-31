@@ -1,8 +1,11 @@
 import json
 from functools import cached_property, lru_cache
+from ipaddress import ip_address
 from pathlib import Path
+from typing import Self
+from urllib.parse import urlparse
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,6 +37,11 @@ class Settings(BaseSettings):
     max_artifact_bytes: int = Field(default=512 * 1024**2, ge=1)
 
     max_upload_bytes: int = Field(default=2 * 1024**3, ge=1)
+    max_upload_overhead_bytes: int = Field(default=16 * 1024**2, ge=1024)
+    resource_pack_base_url: str | None = None
+    max_resource_pack_bytes: int = Field(
+        default=250 * 1024**2, ge=1, le=250 * 1024**2
+    )
     max_extracted_bytes: int = Field(default=8 * 1024**3, ge=1)
     max_archive_files: int = Field(default=100_000, ge=1)
     max_single_file_bytes: int = Field(default=2 * 1024**3, ge=1)
@@ -49,6 +57,42 @@ class Settings(BaseSettings):
     )
     container_memory: str = "2g"
     container_cpus: float = Field(default=2.0, gt=0)
+
+    @model_validator(mode="after")
+    def validate_port_range(self) -> Self:
+        if self.port_min > self.port_max:
+            raise ValueError("MC_PORT_MIN must be less than or equal to MC_PORT_MAX")
+        return self
+
+    @field_validator("resource_pack_base_url")
+    @classmethod
+    def validate_resource_pack_base_url(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        normalized = value.strip().rstrip("/")
+        parsed = urlparse(normalized)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("MC_RESOURCE_PACK_BASE_URL must be a public HTTP(S) base URL")
+        hostname = parsed.hostname or ""
+        if hostname == "localhost" or hostname.endswith((".localhost", ".local")):
+            raise ValueError("MC_RESOURCE_PACK_BASE_URL must not use a local hostname")
+        try:
+            address = ip_address(hostname)
+        except ValueError:
+            pass
+        else:
+            if not address.is_global:
+                raise ValueError(
+                    "MC_RESOURCE_PACK_BASE_URL must not use a private or local IP address"
+                )
+        return normalized
 
     @cached_property
     def java_images(self) -> dict[int, str]:

@@ -10,7 +10,7 @@ Type=simple
 User=mcmanager-worker
 Group=mcmanager
 WorkingDirectory=/opt/mc-manager
-EnvironmentFile=/etc/mc-manager/mc-manager.env
+EnvironmentFile=/opt/mc-manager/config/mc-manager.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=HOME=/var/lib/mc-manager/podman-home

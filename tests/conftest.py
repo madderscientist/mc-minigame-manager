@@ -1,4 +1,5 @@
 import io
+import json
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -43,6 +44,19 @@ def make_map_zip(files: dict[str, bytes] | None = None) -> bytes:
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
         for name, content in (files or {"level.dat": b"test-level"}).items():
             archive.writestr(name, content)
+    return buffer.getvalue()
+
+
+def make_resource_pack_zip(pack_format: int = 22) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr(
+            "pack.mcmeta",
+            json.dumps(
+                {"pack": {"pack_format": pack_format, "description": "Test pack"}}
+            ),
+        )
+        archive.writestr("assets/minecraft/textures/example.png", b"not-a-real-png")
     return buffer.getvalue()
 
 

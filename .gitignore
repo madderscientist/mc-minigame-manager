@@ -9,9 +9,12 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+frontend/node_modules/
 .env
 .env.*
-!.env.example
+!/.env.example
+/config/*
+!/config/README.md
 /tmp/
 /credentials/
 /secrets/
@@ -29,8 +32,12 @@ var/
 *.sqlite3-shm
 *.sqlite3-journal
 *.key
+*.pem
+*.token
 *.p12
 *.pfx
 *.pkcs12
 *.jks
 *.keystore
+/deploy/frp/frpc.toml
+/deploy/frp/client_token

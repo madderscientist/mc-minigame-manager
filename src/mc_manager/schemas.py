@@ -23,6 +23,17 @@ class BackupView(BaseModel):
     created_at: datetime
 
 
+class ResourcePackView(BaseModel):
+    filename: str
+    sha1: str
+    sha256: str
+    size_bytes: int
+    pack_format: int
+    required: bool
+    prompt: str | None
+    url: str
+
+
 class MapView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -34,6 +45,7 @@ class MapView(BaseModel):
     paper_build: str
     java_major: int
     created_at: datetime
+    resource_pack: ResourcePackView | None
 
 
 class GameView(BaseModel):

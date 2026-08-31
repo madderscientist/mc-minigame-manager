@@ -8,7 +8,7 @@ import pytest
 from mc_manager.config import Settings
 from mc_manager.errors import ValidationError
 from mc_manager.services.archive import SafeZipExtractor
-from tests.conftest import make_map_zip
+from tests.conftest import make_map_zip, make_resource_pack_zip
 
 
 @pytest.mark.parametrize("name", ["../escape.txt", "/absolute.txt", "C:/windows.txt"])
@@ -39,3 +39,29 @@ def test_rejects_symlink_entry(tmp_path: Path, settings: Settings) -> None:
     source.write_bytes(buffer.getvalue())
     with pytest.raises(ValidationError, match="符号链接"):
         SafeZipExtractor(settings).extract(source, tmp_path / "out")
+
+
+def test_validates_resource_pack_metadata(tmp_path: Path, settings: Settings) -> None:
+    source = tmp_path / "pack.zip"
+    source.write_bytes(make_resource_pack_zip(pack_format=22))
+    assert SafeZipExtractor(settings).validate_resource_pack(source) == 22
+
+
+@pytest.mark.parametrize(
+    ("files", "message"),
+    [
+        ({"nested/pack.mcmeta": b'{}'}, "根目录"),
+        ({"pack.mcmeta": b'{}'}, "元数据"),
+        ({"pack.mcmeta": b'{"pack":{"pack_format":true}}'}, "必须是整数"),
+    ],
+)
+def test_rejects_invalid_resource_pack_metadata(
+    tmp_path: Path,
+    settings: Settings,
+    files: dict[str, bytes],
+    message: str,
+) -> None:
+    source = tmp_path / "bad-pack.zip"
+    source.write_bytes(make_map_zip(files))
+    with pytest.raises(ValidationError, match=message):
+        SafeZipExtractor(settings).validate_resource_pack(source)

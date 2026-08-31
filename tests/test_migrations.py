@@ -31,7 +31,7 @@ def test_initial_migration_creates_control_plane_schema(
     assert "operations" not in tables
     with engine.connect() as connection:
         revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-    assert revision == "20260831_0002"
+    assert revision == "20260831_0003"
     get_settings.cache_clear()
 
 

@@ -8,7 +8,7 @@ Type=oneshot
 User=mcmanager-worker
 Group=mcmanager
 WorkingDirectory=/opt/mc-manager
-EnvironmentFile=/etc/mc-manager/mc-manager.env
+EnvironmentFile=/opt/mc-manager/config/mc-manager.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/opt/mc-manager/.venv/bin/alembic upgrade head
 ExecStartPost=/bin/chmod 0660 /var/lib/mc-manager/mc-manager.db

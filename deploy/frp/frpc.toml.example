@@ -1,10 +1,9 @@
-serverAddr = "frps.example.com"
+serverAddr = "example.com"
 serverPort = 7000
 user = "mc-host-01"
 
 auth.method = "token"
-auth.tokenSource.type = "file"
-auth.tokenSource.file.path = "/etc/frp/client_token"
+auth.token = "replace-with-frps-token"
 
 transport.tls.enable = true
 
@@ -25,3 +24,13 @@ healthCheck.timeoutSeconds = 3
 healthCheck.maxFailed = 3
 healthCheck.intervalSeconds = 10
 {{- end }}
+
+# 可选：玩家资源包 HTTP 下载通道。请在 frps 放行 18080，并在 example.com 上已有的
+# HTTPS 入口中将 /resource-packs/ 转发到 127.0.0.1:18080。若没有 TLS 终止，
+# 直接 TCP 映射得到的是 http://example.com:18080，而不是 HTTPS。
+# [[proxies]]
+# name = "mc-resource-packs"
+# type = "tcp"
+# localIP = "127.0.0.1"
+# localPort = 8080
+# remotePort = 18080

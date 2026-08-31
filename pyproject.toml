@@ -37,6 +37,9 @@ mc-manager-init = "mc_manager.cli:init_command"
 [tool.hatch.build.targets.wheel]
 packages = ["src/mc_manager"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"migrations" = "mc_manager/migrations"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
