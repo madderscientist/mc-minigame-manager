@@ -1,0 +1,7 @@
+[Unit]
+Description=Minecraft Minigame Management Stack
+Wants=frpc.service mc-manager-api.service mc-manager-worker.service
+After=network-online.target frpc.service
+
+[Install]
+WantedBy=multi-user.target

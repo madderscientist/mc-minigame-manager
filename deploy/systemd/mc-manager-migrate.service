@@ -1,0 +1,20 @@
+[Unit]
+Description=Minecraft Manager Database Migration
+After=local-fs.target
+RequiresMountsFor=/var/lib/mc-manager
+
+[Service]
+Type=oneshot
+User=mcmanager-worker
+Group=mcmanager
+WorkingDirectory=/opt/mc-manager
+EnvironmentFile=/etc/mc-manager/mc-manager.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/mc-manager/.venv/bin/alembic upgrade head
+ExecStartPost=/bin/chmod 0660 /var/lib/mc-manager/mc-manager.db
+UMask=0007
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/mc-manager

@@ -1,0 +1,30 @@
+[Unit]
+Description=Global FRP Client for Minecraft Port Pool
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=frp
+Group=frp
+ExecStartPre=/usr/local/bin/frpc verify -c /etc/frp/frpc.toml
+ExecStart=/usr/local/bin/frpc -c /etc/frp/frpc.toml
+ExecReload=/usr/local/bin/frpc reload -c /etc/frp/frpc.toml
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

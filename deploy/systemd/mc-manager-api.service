@@ -1,0 +1,35 @@
+[Unit]
+Description=Minecraft Minigame Manager API
+Wants=network-online.target
+Requires=mc-manager-migrate.service
+After=network-online.target mc-manager-migrate.service
+RequiresMountsFor=/var/lib/mc-manager /srv/mc-manager
+
+[Service]
+Type=simple
+User=mcmanager-api
+Group=mcmanager
+WorkingDirectory=/opt/mc-manager
+EnvironmentFile=/etc/mc-manager/mc-manager.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/mc-manager/.venv/bin/uvicorn mc_manager.app:app --host 127.0.0.1 --port 8080 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+UMask=0007
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/mc-manager /srv/mc-manager/maps /srv/mc-manager/repository /srv/mc-manager/uploads /srv/mc-manager/.staging/api
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

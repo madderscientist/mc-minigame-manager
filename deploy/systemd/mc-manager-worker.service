@@ -1,0 +1,38 @@
+[Unit]
+Description=Minecraft Minigame Manager Worker
+Wants=network-online.target
+Requires=mc-manager-migrate.service
+After=network-online.target mc-manager-migrate.service
+RequiresMountsFor=/var/lib/mc-manager /srv/mc-manager
+
+[Service]
+Type=simple
+User=mcmanager-worker
+Group=mcmanager
+WorkingDirectory=/opt/mc-manager
+EnvironmentFile=/etc/mc-manager/mc-manager.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=HOME=/var/lib/mc-manager/podman-home
+Environment=XDG_RUNTIME_DIR=/run/mc-manager-podman
+RuntimeDirectory=mc-manager-podman
+RuntimeDirectoryMode=0700
+Delegate=yes
+ExecStart=/opt/mc-manager/.venv/bin/python -m mc_manager.worker
+Restart=always
+RestartSec=3
+TimeoutStopSec=180
+UMask=0007
+LimitNOFILE=65535
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/mc-manager /srv/mc-manager/maps /srv/mc-manager/repository /srv/mc-manager/games /srv/mc-manager/active /srv/mc-manager/backups /srv/mc-manager/artifacts /srv/mc-manager/.staging/worker
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

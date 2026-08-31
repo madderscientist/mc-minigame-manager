@@ -1,0 +1,27 @@
+serverAddr = "frps.example.com"
+serverPort = 7000
+user = "mc-host-01"
+
+auth.method = "token"
+auth.tokenSource.type = "file"
+auth.tokenSource.file.path = "/etc/frp/client_token"
+
+transport.tls.enable = true
+
+webServer.addr = "127.0.0.1"
+webServer.port = 7400
+
+# 本地端口与 frps 远端端口一一对应。修改范围后先运行 frpc verify，再 reload。
+{{- range $_, $v := parseNumberRangePair "30000-30099" "30000-30099" }}
+[[proxies]]
+name = "mc-{{ $v.First }}"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = {{ $v.First }}
+remotePort = {{ $v.Second }}
+
+healthCheck.type = "tcp"
+healthCheck.timeoutSeconds = 3
+healthCheck.maxFailed = 3
+healthCheck.intervalSeconds = 10
+{{- end }}
