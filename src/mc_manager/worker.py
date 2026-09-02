@@ -31,6 +31,7 @@ from mc_manager.services.backups import BackupService
 from mc_manager.services.ports import PortService
 from mc_manager.services.server_properties import (
     PAPER_PERMISSION_PROPERTIES,
+    update_server_operators,
     update_server_properties,
 )
 from mc_manager.services.storage import Storage
@@ -224,6 +225,10 @@ class Worker:
             update_server_properties(
                 game_path / "server.properties",
                 PAPER_PERMISSION_PROPERTIES,
+            )
+            update_server_operators(
+                game_path / "ops.json",
+                self.settings.default_operators,
             )
             source = game.map
             if self.settings.runtime_backend in {"docker", "podman"}:

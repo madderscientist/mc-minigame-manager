@@ -1,12 +1,42 @@
 import json
+import re
 from functools import cached_property, lru_cache
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Self
+from typing import Self, cast
 from urllib.parse import urlparse
+from uuid import UUID
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+PLAYER_NAME = re.compile(r"^[A-Za-z0-9_]{1,16}$")
+
+
+def _parse_default_operators(value: str) -> dict[str, str]:
+    try:
+        payload: object = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError("MC_DEFAULT_OPERATORS_JSON must be a JSON object") from error
+    if not isinstance(payload, dict):
+        raise ValueError("MC_DEFAULT_OPERATORS_JSON must be a JSON object")
+    operators: dict[str, str] = {}
+    names: set[str] = set()
+    for raw_name, raw_uuid in cast(dict[object, object], payload).items():
+        if not isinstance(raw_name, str) or PLAYER_NAME.fullmatch(raw_name) is None:
+            raise ValueError("MC_DEFAULT_OPERATORS_JSON contains an invalid player name")
+        if not isinstance(raw_uuid, str):
+            raise ValueError("MC_DEFAULT_OPERATORS_JSON contains a non-string UUID")
+        try:
+            normalized_uuid = str(UUID(raw_uuid))
+        except ValueError as error:
+            raise ValueError("MC_DEFAULT_OPERATORS_JSON contains an invalid UUID") from error
+        normalized_name = raw_name.casefold()
+        if normalized_uuid in operators or normalized_name in names:
+            raise ValueError("MC_DEFAULT_OPERATORS_JSON contains duplicate players")
+        operators[normalized_uuid] = raw_name
+        names.add(normalized_name)
+    return operators
 
 
 class Settings(BaseSettings):
@@ -37,6 +67,7 @@ class Settings(BaseSettings):
     allow_unstable_paper: bool = False
     paper_allowed_hosts: str = "fill.papermc.io,fill-data.papermc.io"
     max_artifact_bytes: int = Field(default=512 * 1024**2, ge=1)
+    default_operators_json: str = "{}"
 
     max_upload_bytes: int = Field(default=2 * 1024**3, ge=1)
     max_upload_overhead_bytes: int = Field(default=16 * 1024**2, ge=1024)
@@ -133,6 +164,12 @@ class Settings(BaseSettings):
                 )
         return normalized
 
+    @field_validator("default_operators_json")
+    @classmethod
+    def validate_default_operators_json(cls, value: str) -> str:
+        _parse_default_operators(value)
+        return value
+
     @cached_property
     def java_images(self) -> dict[int, str]:
         parsed = json.loads(self.java_images_json)
@@ -147,6 +184,10 @@ class Settings(BaseSettings):
             for host in self.paper_allowed_hosts.split(",")
             if host.strip()
         }
+
+    @cached_property
+    def default_operators(self) -> dict[str, str]:
+        return _parse_default_operators(self.default_operators_json)
 
     @property
     def map_root(self) -> Path:

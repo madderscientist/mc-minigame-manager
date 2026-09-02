@@ -204,6 +204,9 @@ def test_paper_permissions_are_enforced_on_import_and_start(
     app_client: tuple[TestClient, Worker, FakeRuntime], upload_map
 ) -> None:
     client, worker, _runtime = app_client
+    worker.settings.default_operators_json = (
+        '{"TestOperator":"123e4567e89b42d3a456426614174000"}'
+    )
     archive = make_map_zip(
         {
             "world/level.dat": b"test-level",
@@ -241,6 +244,15 @@ def test_paper_permissions_are_enforced_on_import_and_start(
     assert "enable-command-block=true" in started_properties
     assert "function-permission-level=4" in started_properties
     assert "op-permission-level=4" in started_properties
+    operators = json.loads((properties_path.parent / "ops.json").read_text())
+    assert operators == [
+        {
+            "uuid": "123e4567-e89b-42d3-a456-426614174000",
+            "name": "TestOperator",
+            "level": 4,
+            "bypassesPlayerLimit": False,
+        }
+    ]
 
 
 def test_game_list_avoids_per_game_run_queries(

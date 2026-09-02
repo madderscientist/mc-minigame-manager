@@ -263,6 +263,7 @@ ensure_env_default() {
 }
 ensure_env_default "$LOCAL_CONFIG_DIR/mc-manager.env" MC_RESOURCE_PACK_BASE_URL ""
 ensure_env_default "$LOCAL_CONFIG_DIR/mc-manager.env" MC_MAX_RESOURCE_PACK_BYTES 262144000
+ensure_env_default "$LOCAL_CONFIG_DIR/mc-manager.env" MC_DEFAULT_OPERATORS_JSON "{}"
 api_token_count=$(grep -c '^MC_API_TOKEN=' "$LOCAL_CONFIG_DIR/mc-manager.env" || true)
 api_token=$(sed -n 's/^MC_API_TOKEN=//p' "$LOCAL_CONFIG_DIR/mc-manager.env")
 if [[ $api_token_count -ne 1 ]] || [[ ${#api_token} -lt 32 ]] || \

@@ -24,3 +24,7 @@ frps Token 直接填写在 `config/frpc.toml` 的 `auth.token` 中，因此该�
 重新填写。
 
 不要提交此目录中的实际配置、Token、备份或临时副本。
+
+`MC_DEFAULT_OPERATORS_JSON` 配置所有游戏的默认 4 级 OP 名单，格式为
+`{"Java玩家名":"正版UUID"}`。Worker 会在每次启动 Paper 前合并名单，不会删除地图已有
+管理员。玩家改名后应更新键名，UUID 保持不变。

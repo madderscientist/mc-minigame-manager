@@ -67,3 +67,28 @@ def test_accepts_public_resource_pack_url() -> None:
 def test_upload_reservation_must_fit_one_maximum_upload() -> None:
     with pytest.raises(ValidationError, match="MC_MAX_UPLOAD_RESERVED_BYTES"):
         Settings(max_upload_bytes=1024, max_upload_reserved_bytes=512)
+
+
+def test_parses_default_operators() -> None:
+    settings = Settings(
+        default_operators_json=(
+            '{"TestOperator":"123e4567e89b42d3a456426614174000"}'
+        )
+    )
+
+    assert settings.default_operators == {
+        "123e4567-e89b-42d3-a456-426614174000": "TestOperator"
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "[]",
+        '{"invalid player":"6fcadf9f54ee4dcdb917261794477a04"}',
+        '{"player":"not-a-uuid"}',
+    ],
+)
+def test_rejects_invalid_default_operators(value: str) -> None:
+    with pytest.raises(ValidationError, match="MC_DEFAULT_OPERATORS_JSON"):
+        Settings(default_operators_json=value)
