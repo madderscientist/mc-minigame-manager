@@ -47,12 +47,17 @@ export interface MapRecord {
 export interface Game {
   game_id: number
   map_id: number
+  map_name: string
+  mc_version: string
+  paper_build: string
+  java_major: number
   state: ResourceState
   name: string
   created_at: string
   last_played_at: string | null
   runtime_state: RuntimeState | null
   port: number | null
+  public_address: string | null
   backups: Backup[]
 }
 
@@ -76,8 +81,12 @@ export interface Task {
 
 export interface RunningGame {
   game_id: number
+  game_name: string
+  mc_version: string
+  last_played_at: string | null
   observed_state: RuntimeState
   port: number
+  public_address: string | null
   last_error: string | null
 }
 
@@ -114,9 +123,7 @@ export interface MapUploadInput {
   mapFile: File
   name: string
   mcVersion: string
-  paperBuild: string
-  javaMajor: number
-  resources: File[]
+  paperBuild?: string
   resourcePack?: File
   resourcePackRequired?: boolean
   resourcePackPrompt?: string
@@ -128,5 +135,4 @@ export interface MapUploadResult {
   map_id: number
   name: string
   mc_version: string
-  resources: string[]
 }

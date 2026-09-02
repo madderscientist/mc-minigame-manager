@@ -20,6 +20,8 @@ def settings(tmp_path: Path) -> Settings:
         storage_root=tmp_path / "storage",
         port_min=31000,
         port_max=31002,
+        public_game_host="play.example.com",
+        public_game_port_min=41000,
         backup_limit=3,
         runtime_backend="fake",
         start_timeout_seconds=10,

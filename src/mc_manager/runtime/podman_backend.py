@@ -1,5 +1,4 @@
 import json
-import socket
 import subprocess
 import time
 from collections.abc import Sequence
@@ -100,6 +99,8 @@ class PodmanRuntime(RuntimeBackend):
                 "managed-by=mc-minigame-manager",
                 "--label",
                 f"mc-manager.run-id={spec.run_id}",
+                "--log-driver",
+                "k8s-file",
                 "--workdir",
                 "/data",
                 "--publish",
@@ -110,7 +111,7 @@ class PodmanRuntime(RuntimeBackend):
                 f"{spec.paper_jar}:/opt/paper/paper.jar:ro",
                 "--read-only",
                 "--tmpfs",
-                "/tmp:rw,noexec,nosuid,size=256m",
+                "/tmp:rw,exec,nosuid,nodev,size=256m",
                 "--cap-drop",
                 "ALL",
                 "--security-opt",
@@ -127,6 +128,7 @@ class PodmanRuntime(RuntimeBackend):
                 "no",
                 spec.image,
                 "java",
+                "-Duser.timezone=Asia/Shanghai",
                 f"-Xms{spec.java_memory}",
                 f"-Xmx{spec.java_memory}",
                 "-XX:+UseG1GC",
@@ -149,12 +151,8 @@ class PodmanRuntime(RuntimeBackend):
                 timeout=10,
             )
             log_ready = "Done (" in f"{logs.stdout}\n{logs.stderr}"
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=1):
-                    if log_ready:
-                        return True
-            except OSError:
-                pass
+            if log_ready:
+                return True
             time.sleep(1)
         return False
 

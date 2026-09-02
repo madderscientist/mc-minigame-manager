@@ -48,9 +48,9 @@ class Storage:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
             raise ValidationError("destination_exists", "目标地图目录已存在")
-        staging = self.staging_path(prefix)
+        staging = destination.parent / f".{prefix}-{uuid.uuid4().hex}.tmp"
         try:
-            shutil.copytree(source, staging, symlinks=True)
+            self._copy_tree_content(source, staging)
             self.assert_safe_tree(staging)
             os.replace(staging, destination)
         finally:
@@ -59,11 +59,11 @@ class Storage:
 
     def replace_tree_atomic(self, source: Path, destination: Path, *, prefix: str) -> None:
         self.assert_safe_tree(source)
-        staging = self.staging_path(f"{prefix}-new")
-        rollback = self.staging_path(f"{prefix}-old")
         destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = destination.parent / f".{prefix}-new-{uuid.uuid4().hex}.tmp"
+        rollback = destination.parent / f".{prefix}-old-{uuid.uuid4().hex}.tmp"
         try:
-            shutil.copytree(source, staging, symlinks=True)
+            self._copy_tree_content(source, staging)
             self.assert_safe_tree(staging)
             if destination.exists():
                 os.replace(destination, rollback)
@@ -79,6 +79,18 @@ class Storage:
                 shutil.rmtree(staging, ignore_errors=True)
             if rollback.exists() and destination.exists():
                 shutil.rmtree(rollback, ignore_errors=True)
+
+    @staticmethod
+    def _copy_tree_content(source: Path, destination: Path) -> None:
+        """Copy a validated tree without untrusted modes, timestamps, or xattrs."""
+        destination.mkdir(mode=0o770)
+        for item in source.rglob("*"):
+            target = destination / item.relative_to(source)
+            if item.is_dir():
+                target.mkdir(mode=0o770, parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(mode=0o770, parents=True, exist_ok=True)
+                shutil.copyfile(item, target)
 
     @staticmethod
     def tree_digest(path: Path) -> tuple[str, int]:

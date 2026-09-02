@@ -1,6 +1,5 @@
 import type {
   ApiErrorBody,
-  Backup,
   Game,
   MapRecord,
   MapUploadInput,
@@ -167,7 +166,6 @@ export const api = {
   },
   stop: (gameId: number) =>
     command<TaskAccepted>('/api/stop', { game_id: gameId }, `stop:${gameId}`),
-  backups: (gameId: number) => request<Backup[]>(`/api/games/${gameId}/backups`),
   load: (gameId: number, backupId: string) =>
     command<TaskAccepted>('/api/load', { game_id: gameId, backup_id: backupId }, `load:${gameId}`),
   deleteBackup: (gameId: number, backupId: string) =>
@@ -181,7 +179,6 @@ export const api = {
 function uploadMap(input: MapUploadInput, onProgress: (value: number) => void): Promise<MapUploadResult> {
   const fingerprint = JSON.stringify({
     map: [input.mapFile.name, input.mapFile.size, input.mapFile.lastModified],
-    resources: input.resources.map((file) => [file.name, file.size, file.lastModified]),
     resourcePack: input.resourcePack
       ? [input.resourcePack.name, input.resourcePack.size, input.resourcePack.lastModified]
       : null,
@@ -189,8 +186,7 @@ function uploadMap(input: MapUploadInput, onProgress: (value: number) => void): 
     resourcePackPrompt: input.resourcePackPrompt ?? '',
     name: input.name,
     mcVersion: input.mcVersion,
-    paperBuild: input.paperBuild,
-    javaMajor: input.javaMajor,
+    paperBuild: input.paperBuild ?? '',
     paperUrl: input.paperUrl ?? '',
     paperSha256: input.paperSha256 ?? '',
   })
@@ -202,8 +198,7 @@ function uploadMap(input: MapUploadInput, onProgress: (value: number) => void): 
   form.append('map', input.mapFile, 'map.zip')
   form.append('name', input.name)
   form.append('mc_version', input.mcVersion)
-  form.append('paper_build', input.paperBuild)
-  form.append('java_major', String(input.javaMajor))
+  if (input.paperBuild) form.append('paper_build', input.paperBuild)
   if (input.paperUrl) form.append('paper_url', input.paperUrl)
   if (input.paperSha256) form.append('paper_sha256', input.paperSha256)
   if (input.resourcePack) {
@@ -213,8 +208,6 @@ function uploadMap(input: MapUploadInput, onProgress: (value: number) => void): 
       form.append('resource_pack_prompt', input.resourcePackPrompt)
     }
   }
-  input.resources.forEach((file, index) => form.append(`res${index + 1}`, file, file.name))
-
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     xhr.open('POST', '/api/maps')
@@ -243,10 +236,15 @@ function uploadMap(input: MapUploadInput, onProgress: (value: number) => void): 
           }
           reject(error)
         } catch {
+          const message = xhr.status === 413
+            ? 'HTTPS 代理拒绝了大文件上传（413），请提高反向代理的上传大小限制'
+            : xhr.status === 502 || xhr.status === 504
+              ? 'HTTPS 代理连接后端超时，请检查代理超时设置后重试'
+              : `上传失败（HTTP ${xhr.status}），请检查代理和服务日志`
           const error = new ApiError(
             xhr.status,
             `http_${xhr.status}`,
-            '上传失败，请检查文件和版本信息',
+            message,
           )
           if (!shouldRetainIdempotencyKey(error)) {
             clearSavedIdempotency(storageKey, idempotencyKey)

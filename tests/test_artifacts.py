@@ -4,7 +4,7 @@ from typing import Any
 import pytest
 
 from mc_manager.errors import ValidationError
-from mc_manager.services.artifacts import ArtifactManager
+from mc_manager.services.artifacts import ArtifactManager, latest_stable_paper_build
 
 
 class FakeResponse:
@@ -17,6 +17,19 @@ class FakeResponse:
 
     def json(self) -> Any:
         return self.payload
+
+
+def test_selects_latest_stable_paper_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = [
+        {"id": 496, "channel": "STABLE", "downloads": {"server:default": {}}},
+        {"id": 499, "channel": "EXPERIMENTAL", "downloads": {"server:default": {}}},
+        {"id": 497, "channel": "STABLE", "downloads": {"server:default": {}}},
+    ]
+    monkeypatch.setattr("httpx.get", lambda *args, **kwargs: FakeResponse(payload))
+    assert (
+        latest_stable_paper_build("1.20.4", user_agent="test/1.0 (test@example.com)")
+        == "497"
+    )
 
 
 def test_resolves_exact_stable_paper_build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -8,6 +8,7 @@ import shutil
 import uuid
 from collections.abc import Generator
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, BinaryIO
 
@@ -55,14 +56,16 @@ from mc_manager.schemas import (
     UploadResult,
 )
 from mc_manager.services.archive import SafeZipExtractor
+from mc_manager.services.artifacts import latest_stable_paper_build
 from mc_manager.services.maps import (
     RESOURCE_PACK_STORAGE_NAME,
+    SAFE_RESOURCE_NAME,
     MapService,
     ResourcePackImport,
 )
 from mc_manager.services.storage import Storage
 from mc_manager.services.tasks import LIVE_STATES, TaskService
-from mc_manager.services.versions import read_data_version
+from mc_manager.services.versions import read_data_version, required_java_major
 
 logger = logging.getLogger(__name__)
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
@@ -216,7 +219,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         form = await request.form(max_files=256, max_fields=32, max_part_size=1024 * 1024)
         map_upload: UploadFile | None = None
         resource_pack_upload: UploadFile | None = None
-        resources: list[UploadFile] = []
         fields: dict[str, str] = {}
         try:
             for key, value in form.multi_items():
@@ -232,7 +234,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             raise ValidationError("duplicate_map", "只能上传一个 map.zip")
                         map_upload = value
                     else:
-                        resources.append(value)
+                        raise ValidationError(
+                            "unexpected_upload", "只允许上传地图和一个玩家资源包"
+                        )
                 else:
                     fields[key] = str(value)
             if map_upload is None:
@@ -256,30 +260,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             map_digest, _ = await _save_upload(
                 map_upload, map_path, resolved_settings.max_upload_bytes
             )
-            resource_paths: list[Path] = []
-            resource_digests: list[tuple[str, str]] = []
             total = map_path.stat().st_size
-            for index, resource in enumerate(resources, start=1):
-                filename = Path(resource.filename or f"res{index}.zip").name
-                if filename != (resource.filename or filename):
-                    raise ValidationError("resource_name_invalid", "资源文件名包含路径")
-                resource_path = upload_dir / filename
-                remaining = resolved_settings.max_upload_bytes - total
-                if remaining <= 0:
-                    raise ValidationError("upload_too_large", "上传总大小超过限制")
-                resource_digest, _ = await _save_upload(resource, resource_path, remaining)
-                total += resource_path.stat().st_size
-                resource_paths.append(resource_path)
-                resource_digests.append((filename, resource_digest))
 
             resource_pack_import: ResourcePackImport | None = None
             resource_pack_digest: tuple[str, str] | None = None
             if resource_pack_upload is not None:
-                filename = Path(resource_pack_upload.filename or "resource-pack.zip").name
-                if filename != (resource_pack_upload.filename or filename):
-                    raise ValidationError(
-                        "resource_pack_name_invalid", "客户端资源包文件名包含路径"
-                    )
+                submitted_filename = resource_pack_upload.filename or ""
+                filename = Path(submitted_filename.replace("\\", "/")).name
+                if not SAFE_RESOURCE_NAME.fullmatch(filename):
+                    filename = "resources.zip"
                 resource_pack_path = upload_dir / "client-resource-pack.zip"
                 remaining = resolved_settings.max_upload_bytes - total
                 if remaining <= 0:
@@ -308,12 +297,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
 
             try:
-                java_major = int(fields.get("java_major", "17"))
+                java_major = required_java_major(fields.get("mc_version", ""))
             except ValueError as error:
-                raise ValidationError("java_invalid", "java_major 必须是整数") from error
+                raise ValidationError("mc_version_unsupported", str(error)) from error
+            requested_paper_build = fields.get("paper_build", "").strip()
+            hash_fields = dict(fields)
+            if requested_paper_build:
+                fields["paper_build"] = requested_paper_build
+            elif fields.get("paper_url", "").strip():
+                fields["paper_build"] = "custom"
+                hash_fields["paper_build"] = "custom"
+            else:
+                with database.session_factory() as session:
+                    reusable_build = maps.latest_reusable_paper_build(
+                        session, fields.get("mc_version", "")
+                    )
+                if reusable_build is None:
+                    reusable_build = await to_thread.run_sync(
+                        partial(
+                            latest_stable_paper_build,
+                            fields.get("mc_version", "").strip(),
+                            user_agent=resolved_settings.papermc_user_agent,
+                        )
+                    )
+                fields["paper_build"] = reusable_build
+                hash_fields["paper_build"] = "automatic-compatible"
             import_hash = _map_import_hash(
                 map_digest=map_digest,
-                resource_digests=resource_digests,
                 resource_pack_digest=resource_pack_digest,
                 resource_pack_required=(
                     resource_pack_import.required if resource_pack_import else False
@@ -321,7 +331,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 resource_pack_prompt=(
                     resource_pack_import.prompt if resource_pack_import else None
                 ),
-                fields=fields,
+                fields=hash_fields,
                 java_major=java_major,
             )
             record = await to_thread.run_sync(
@@ -329,7 +339,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 database,
                 maps,
                 map_path,
-                resource_paths,
                 fields.get("name", ""),
                 fields.get("mc_version", ""),
                 fields.get("paper_build", ""),
@@ -344,7 +353,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 map_id=record.map_id,
                 name=record.name,
                 mc_version=record.mc_version,
-                resources=list(record.extra_metadata.get("resources", [])),
             )
         finally:
             await to_thread.run_sync(_remove_tree, upload_dir)
@@ -396,7 +404,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             .unique()
             .all()
         )
-        return [_game_view(game, run) for game, run in rows]
+        return [_game_view(game, run, resolved_settings) for game, run in rows]
 
     @app.post(
         "/api/games",
@@ -435,7 +443,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             .where(RunRecord.game_id == game_id)
             .order_by(RunRecord.created_at.desc(), RunRecord.run_id.desc())
         )
-        return _game_view(game, run)
+        return _game_view(game, run, resolved_settings)
 
     @app.delete(
         "/api/games/{game_id}",
@@ -579,8 +587,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             running_games=[
                 RunningGameView(
                     game_id=run.game_id,
+                    game_name=run.game.name,
+                    mc_version=run.game.map.mc_version,
+                    last_played_at=run.game.last_played_at,
                     observed_state=run.observed_state,
                     port=run.port,
+                    public_address=resolved_settings.public_game_address(run.port),
                     last_error=run.last_error,
                 )
                 for run in runs
@@ -622,11 +634,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-def _game_view(game: GameRecord, run: RunRecord | None) -> GameView:
-    view = GameView.model_validate(game)
-    if run is None:
-        return view
-    return view.model_copy(update={"runtime_state": run.observed_state, "port": run.port})
+def _game_view(game: GameRecord, run: RunRecord | None, settings: Settings) -> GameView:
+    runtime_state = run.observed_state if run is not None else None
+    port: int | None = None
+    public_address: str | None = None
+    if run is not None and run.observed_state in LIVE_STATES:
+        port = run.port
+        public_address = settings.public_game_address(run.port)
+    return GameView(
+        game_id=game.game_id,
+        map_id=game.map_id,
+        map_name=game.map.name,
+        mc_version=game.map.mc_version,
+        paper_build=game.map.paper_build,
+        java_major=game.map.java_major,
+        state=game.state,
+        name=game.name,
+        created_at=game.created_at,
+        last_played_at=game.last_played_at,
+        runtime_state=runtime_state,
+        port=port,
+        public_address=public_address,
+        backups=game.retained_backups,
+    )
 
 
 def _error_response(
@@ -693,7 +723,6 @@ def _parse_form_bool(value: str | None, default: bool) -> bool:
 def _map_import_hash(
     *,
     map_digest: str,
-    resource_digests: list[tuple[str, str]],
     resource_pack_digest: tuple[str, str] | None = None,
     resource_pack_required: bool = False,
     resource_pack_prompt: str | None = None,
@@ -702,7 +731,6 @@ def _map_import_hash(
 ) -> str:
     payload = {
         "map": map_digest,
-        "resources": resource_digests,
         "resource_pack": resource_pack_digest,
         "resource_pack_required": resource_pack_required,
         "resource_pack_prompt": resource_pack_prompt,
@@ -721,7 +749,6 @@ def _import_map(
     database: Database,
     maps: MapService,
     map_path: Path,
-    resource_paths: list[Path],
     name: str,
     mc_version: str,
     paper_build: str,
@@ -746,7 +773,6 @@ def _import_map(
                 database,
                 maps,
                 map_path,
-                resource_paths,
                 name,
                 mc_version,
                 paper_build,
@@ -761,7 +787,6 @@ def _import_map(
         database,
         maps,
         map_path,
-        resource_paths,
         name,
         mc_version,
         paper_build,
@@ -778,7 +803,6 @@ def _import_map_locked(
     database: Database,
     maps: MapService,
     map_path: Path,
-    resource_paths: list[Path],
     name: str,
     mc_version: str,
     paper_build: str,
@@ -803,7 +827,6 @@ def _import_map_locked(
                     existing,
                     import_hash,
                     map_path,
-                    resource_paths,
                     resource_pack,
                 )
         try:
@@ -836,7 +859,6 @@ def _import_map_locked(
                 existing,
                 import_hash,
                 map_path,
-                resource_paths,
                 resource_pack,
             )
 
@@ -845,7 +867,6 @@ def _import_map_locked(
                 session,
                 record,
                 archive_path=map_path,
-                resource_paths=resource_paths,
                 resource_pack=resource_pack,
             )
             session.commit()
@@ -865,7 +886,6 @@ def _existing_map_import(
     record: MapRecord,
     import_hash: str,
     map_path: Path,
-    resource_paths: list[Path],
     resource_pack: ResourcePackImport | None,
 ) -> MapRecord:
     if record.import_request_hash != import_hash:
@@ -876,21 +896,10 @@ def _existing_map_import(
     if record.state == ResourceState.READY:
         return record
     destination = maps.storage.resolve(record.relative_path)
-    if record.state == ResourceState.PREPARING and destination.is_dir():
+    if record.state in {ResourceState.PREPARING, ResourceState.FAILED} and destination.is_dir():
         record.content_sha256, _ = maps.storage.tree_digest(destination)
         record.data_version = read_data_version(destination)
-        resource_directory = destination / ".mc-manager-resources"
-        resources = (
-            sorted(
-                path.name
-                for path in resource_directory.iterdir()
-                if path.is_file() and path.name != RESOURCE_PACK_STORAGE_NAME
-            )
-            if resource_directory.is_dir()
-            else []
-        )
         record.extra_metadata = {
-            "resources": resources,
             "resource_pack": (
                 maps.describe_resource_pack(record.map_id, resource_pack)
                 if resource_pack is not None
@@ -900,13 +909,14 @@ def _existing_map_import(
         record.state = ResourceState.READY
         session.commit()
         return record
-    if record.state == ResourceState.PREPARING:
+    if record.state in {ResourceState.PREPARING, ResourceState.FAILED}:
+        record.state = ResourceState.PREPARING
+        session.commit()
         try:
             record = maps.publish_import(
                 session,
                 record,
                 archive_path=map_path,
-                resource_paths=resource_paths,
                 resource_pack=resource_pack,
             )
             session.commit()

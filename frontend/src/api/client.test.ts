@@ -55,6 +55,29 @@ describe('API client', () => {
     })
   })
 
+  it('explains an HTML 413 response from the HTTPS proxy', async () => {
+    class PayloadTooLargeXmlHttpRequest {
+      upload = { onprogress: null as ((event: ProgressEvent) => void) | null }
+      status = 413
+      responseText = '<html><title>413 Request Entity Too Large</title></html>'
+      onload: (() => void) | null = null
+      onerror: (() => void) | null = null
+      open() {}
+      setRequestHeader() {}
+      send() { this.onload?.() }
+    }
+    vi.stubGlobal('XMLHttpRequest', PayloadTooLargeXmlHttpRequest)
+
+    await expect(api.uploadMap({
+      mapFile: new File(['map'], 'map.zip'),
+      name: 'Map',
+      mcVersion: '1.20.4',
+    }, vi.fn())).rejects.toMatchObject({
+      status: 413,
+      message: expect.stringContaining('HTTPS 代理拒绝了大文件上传'),
+    })
+  })
+
   it('reuses the idempotency key after an unknown network result', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
       .mockRejectedValueOnce(new TypeError('network failed'))
@@ -133,7 +156,7 @@ describe('API client', () => {
           return
         }
         this.status = 201
-        this.responseText = JSON.stringify({ map_id: 9, name: 'Map', mc_version: '1.20.4', resources: [] })
+        this.responseText = JSON.stringify({ map_id: 9, name: 'Map', mc_version: '1.20.4' })
         this.onload?.()
       }
     }
@@ -143,7 +166,7 @@ describe('API client', () => {
       resourcePack: new File(['pack'], 'visuals.zip', { lastModified: 2 }),
       resourcePackRequired: true,
       resourcePackPrompt: '请下载材质包',
-      name: 'Map', mcVersion: '1.20.4', paperBuild: '497', javaMajor: 17, resources: [],
+      name: 'Map', mcVersion: '1.20.4',
     }
 
     await expect(api.uploadMap(input, vi.fn())).rejects.toMatchObject({ code: 'network_error' })
@@ -157,6 +180,8 @@ describe('API client', () => {
     )
     const form = FakeXmlHttpRequest.instances[2]?.body as FormData
     expect((form.get('resource_pack') as File).name).toBe('visuals.zip')
+    expect(form.has('java_major')).toBe(false)
+    expect(form.has('paper_build')).toBe(false)
     expect(form.get('resource_pack_required')).toBe('true')
     expect(form.get('resource_pack_prompt')).toBe('请下载材质包')
   })

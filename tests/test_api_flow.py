@@ -1,5 +1,6 @@
 import hashlib
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -72,6 +73,10 @@ def test_map_game_start_stop_backup_load_and_delete(
     game = client.get(f"/api/games/{game_id}").json()
     assert game["game_id"] == game_id
     assert game["map_id"] == map_id
+    assert game["map_name"] == "Spleef"
+    assert game["mc_version"] == "1.20.4"
+    assert game["paper_build"] == "497"
+    assert game["java_major"] == 21
     assert game["name"] == "Round one"
     assert game["state"] == "ready"
 
@@ -100,6 +105,13 @@ def test_map_game_start_stop_backup_load_and_delete(
     assert start_task["status"] == "succeeded"
     assert start_task["result"] == {"game_id": game_id, "port": 31000}
     assert "run_id" not in start_task
+
+    running_game = client.get(f"/api/games/{game_id}").json()
+    assert running_game["public_address"] == "play.example.com:41000"
+    running_status = client.get("/api/status").json()["running_games"][0]
+    assert running_status["game_name"] == "Round one"
+    assert running_status["mc_version"] == "1.20.4"
+    assert running_status["public_address"] == "play.example.com:41000"
 
     already_running = client.post("/api/start", json={"game_id": game_id})
     assert already_running.status_code == 409
@@ -278,6 +290,70 @@ def test_api_token_protects_api(settings: Settings) -> None:
         assert client.get("/healthz").status_code == 200
 
 
+def test_api_serializes_database_timestamps_as_utc(
+    app_client: tuple[TestClient, Worker, FakeRuntime], map_zip: bytes, upload_map
+) -> None:
+    client, _worker, _runtime = app_client
+    map_id = upload_map(client, map_zip)
+    created_at = client.get(f"/api/maps/{map_id}").json()["created_at"]
+    assert created_at.endswith("Z")
+
+
+def test_map_upload_automatically_locks_latest_stable_paper_build(
+    app_client: tuple[TestClient, Worker, FakeRuntime],
+    map_zip: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _worker, _runtime = app_client
+    monkeypatch.setattr(
+        "mc_manager.app.latest_stable_paper_build",
+        lambda mc_version, *, user_agent: "497",
+    )
+    upload = client.post(
+        "/api/maps",
+        data={"name": "Auto build", "mc_version": "1.20.4"},
+        files={"map": ("map.zip", map_zip, "application/zip")},
+    )
+    assert upload.status_code == 201, upload.text
+    details = client.get(f"/api/maps/{upload.json()['map_id']}").json()
+    assert details["paper_build"] == "497"
+    assert details["java_major"] == 21
+
+
+def test_map_upload_reuses_highest_existing_build_for_same_version(
+    app_client: tuple[TestClient, Worker, FakeRuntime],
+    map_zip: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _worker, _runtime = app_client
+    for build in ("496", "497"):
+        response = client.post(
+            "/api/maps",
+            data={
+                "name": f"Existing {build}",
+                "mc_version": "1.20.4",
+                "paper_build": build,
+            },
+            files={"map": ("map.zip", map_zip, "application/zip")},
+        )
+        assert response.status_code == 201, response.text
+
+    def unexpected_papermc_query(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("同版本已有 build 时不应查询 PaperMC")
+
+    monkeypatch.setattr(
+        "mc_manager.app.latest_stable_paper_build", unexpected_papermc_query
+    )
+    upload = client.post(
+        "/api/maps",
+        data={"name": "Reuse build", "mc_version": "1.20.4"},
+        files={"map": ("map.zip", map_zip, "application/zip")},
+    )
+    assert upload.status_code == 201, upload.text
+    details = client.get(f"/api/maps/{upload.json()['map_id']}").json()
+    assert details["paper_build"] == "497"
+
+
 def test_resource_pack_is_configured_and_publicly_downloadable(
     settings: Settings, map_zip: bytes
 ) -> None:
@@ -295,7 +371,6 @@ def test_resource_pack_is_configured_and_publicly_downloadable(
                 "name": "Pack map",
                 "mc_version": "1.20.4",
                 "paper_build": "497",
-                "java_major": "17",
                 "resource_pack_required": "true",
                 "resource_pack_prompt": '需要此材质包, 输入 "go" 后正常游玩',
             },
@@ -311,6 +386,7 @@ def test_resource_pack_is_configured_and_publicly_downloadable(
             f"/api/maps/{map_id}",
             headers={"Authorization": "Bearer secret-token"},
         ).json()
+        assert details["java_major"] == 21
         pack = details["resource_pack"]
         assert pack["filename"] == "visuals.zip"
         assert pack["pack_format"] == 22
@@ -360,6 +436,145 @@ def test_resource_pack_is_configured_and_publicly_downloadable(
         assert download.headers["x-content-type-options"] == "nosniff"
 
 
+def test_resource_pack_with_unsafe_filename_is_renamed(
+    settings: Settings, map_zip: bytes
+) -> None:
+    values = settings.model_dump()
+    values["resource_pack_base_url"] = "https://packs.example.com"
+    configured = Settings.model_validate(values)
+    with TestClient(create_app(configured)) as client:
+        upload = client.post(
+            "/api/maps",
+            data={
+                "name": "Renamed pack",
+                "mc_version": "1.20.4",
+                "paper_build": "497",
+            },
+            files={
+                "map": ("map.zip", map_zip, "application/zip"),
+                "resource_pack": (
+                    "中文材质包.zip",
+                    make_resource_pack_zip(),
+                    "application/zip",
+                ),
+            },
+        )
+        assert upload.status_code == 201, upload.text
+        details = client.get(f"/api/maps/{upload.json()['map_id']}").json()
+        assert details["resource_pack"]["filename"] == "resources.zip"
+        assert details["resource_pack"]["url"].endswith("/resources.zip")
+
+
+def test_failed_resource_pack_upload_removes_temporary_files(
+    settings: Settings, map_zip: bytes
+) -> None:
+    values = settings.model_dump()
+    values["resource_pack_base_url"] = "https://packs.example.com"
+    configured = Settings.model_validate(values)
+    with TestClient(create_app(configured)) as client:
+        response = client.post(
+            "/api/maps",
+            data={
+                "name": "Invalid pack",
+                "mc_version": "1.20.4",
+                "paper_build": "497",
+            },
+            files={
+                "map": ("map.zip", map_zip, "application/zip"),
+                "resource_pack": ("中文材质包.zip", b"not a zip", "application/zip"),
+            },
+        )
+    assert response.status_code == 422
+    assert not any(configured.upload_root.iterdir())
+    assert not any(configured.map_root.iterdir())
+
+
+def test_uses_bundled_resources_zip_when_no_pack_is_uploaded(
+    settings: Settings,
+) -> None:
+    values = settings.model_dump()
+    values["resource_pack_base_url"] = "https://packs.example.com"
+    configured = Settings.model_validate(values)
+    resource_pack = make_resource_pack_zip()
+    archive = make_map_zip(
+        {"level.dat": b"test-level", "resources.zip": resource_pack}
+    )
+    with TestClient(create_app(configured)) as client:
+        upload = client.post(
+            "/api/maps",
+            data={
+                "name": "Bundled pack",
+                "mc_version": "1.20.4",
+                "paper_build": "497",
+            },
+            files={"map": ("map.zip", archive, "application/zip")},
+        )
+        assert upload.status_code == 201, upload.text
+        map_id = upload.json()["map_id"]
+        details = client.get(f"/api/maps/{map_id}").json()
+        assert details["resource_pack"]["filename"] == "resources.zip"
+        assert details["resource_pack"]["required"] is False
+        assert not (configured.map_root / str(map_id) / "world" / "resources.zip").exists()
+
+
+def test_uploaded_resource_pack_overrides_bundled_resources_zip(
+    settings: Settings,
+) -> None:
+    values = settings.model_dump()
+    values["resource_pack_base_url"] = "https://packs.example.com"
+    configured = Settings.model_validate(values)
+    archive = make_map_zip(
+        {"level.dat": b"test-level", "resources.zip": b"invalid bundled pack"}
+    )
+    with TestClient(create_app(configured)) as client:
+        upload = client.post(
+            "/api/maps",
+            data={
+                "name": "Explicit pack",
+                "mc_version": "1.20.4",
+                "paper_build": "497",
+            },
+            files={
+                "map": ("map.zip", archive, "application/zip"),
+                "resource_pack": (
+                    "visuals.zip",
+                    make_resource_pack_zip(),
+                    "application/zip",
+                ),
+            },
+        )
+        assert upload.status_code == 201, upload.text
+        map_id = upload.json()["map_id"]
+        details = client.get(f"/api/maps/{map_id}").json()
+        assert details["resource_pack"]["filename"] == "visuals.zip"
+        assert not (configured.map_root / str(map_id) / "world" / "resources.zip").exists()
+
+
+def test_map_publish_uses_target_filesystem_for_atomic_replace(
+    app_client: tuple[TestClient, Worker, FakeRuntime],
+    map_zip: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _worker, _runtime = app_client
+    original_replace = __import__("os").replace
+
+    def same_parent_replace(source: str, destination: str) -> None:
+        assert Path(source).parent == Path(destination).parent
+        original_replace(source, destination)
+
+    def reject_metadata_copy(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError("directory metadata cannot be copied")
+
+    monkeypatch.setattr("mc_manager.services.storage.os.replace", same_parent_replace)
+    monkeypatch.setattr("mc_manager.services.storage.shutil.copystat", reject_metadata_copy)
+    upload = client.post(
+        "/api/maps",
+        data={"name": "Cross mount", "mc_version": "1.20.4", "paper_build": "497"},
+        files={"map": ("map.zip", map_zip, "application/zip")},
+    )
+    assert upload.status_code == 201, upload.text
+
+
 def test_resource_pack_requires_public_base_url(
     app_client: tuple[TestClient, Worker, FakeRuntime], map_zip: bytes
 ) -> None:
@@ -384,24 +599,14 @@ def test_resource_pack_requires_public_base_url(
     assert response.json()["error"]["code"] == "resource_pack_base_url_missing"
 
 
-@pytest.mark.parametrize("with_player_pack", [False, True])
-def test_regular_resource_cannot_use_reserved_pack_name(
-    settings: Settings, map_zip: bytes, with_player_pack: bool
-) -> None:
+def test_rejects_additional_upload_files(settings: Settings, map_zip: bytes) -> None:
     values = settings.model_dump()
     values["resource_pack_base_url"] = "https://packs.example.com"
     configured = Settings.model_validate(values)
     files = [
         ("map", ("map.zip", map_zip, "application/zip")),
-        ("res1", ("resource-pack.zip", b"ordinary attachment", "application/zip")),
+        ("res1", ("attachment.zip", b"ordinary attachment", "application/zip")),
     ]
-    if with_player_pack:
-        files.append(
-            (
-                "resource_pack",
-                ("visuals.zip", make_resource_pack_zip(), "application/zip"),
-            )
-        )
 
     with TestClient(create_app(configured)) as client:
         response = client.post(
@@ -415,7 +620,7 @@ def test_regular_resource_cannot_use_reserved_pack_name(
         )
 
     assert response.status_code == 422
-    assert response.json()["error"]["code"] == "resource_name_reserved"
+    assert response.json()["error"]["code"] == "unexpected_upload"
 
 
 def test_map_import_removes_untrusted_resource_pack_url(
@@ -480,8 +685,11 @@ def test_map_upload_is_idempotent(
     assert changed.json()["error"]["code"] == "idempotency_key_reused"
 
 
-def test_map_upload_resumes_preparing_record_after_crash(
-    app_client: tuple[TestClient, Worker, FakeRuntime], map_zip: bytes
+@pytest.mark.parametrize("interrupted_state", [ResourceState.PREPARING, ResourceState.FAILED])
+def test_map_upload_resumes_interrupted_record_after_crash(
+    app_client: tuple[TestClient, Worker, FakeRuntime],
+    map_zip: bytes,
+    interrupted_state: ResourceState,
 ) -> None:
     client, _worker, _runtime = app_client
     fields = {
@@ -492,17 +700,16 @@ def test_map_upload_resumes_preparing_record_after_crash(
     }
     import_hash = _map_import_hash(
         map_digest=hashlib.sha256(map_zip).hexdigest(),
-        resource_digests=[],
         fields=fields,
-        java_major=17,
+        java_major=21,
     )
     with client.app.state.database.session_factory() as session:
         record = MapRecord(
-            state=ResourceState.PREPARING,
+            state=interrupted_state,
             name="Recovered map",
             mc_version="1.20.4",
             paper_build="497",
-            java_major=17,
+            java_major=21,
             relative_path="pending",
             import_idempotency_key="map-upload-crashed",
             import_request_hash=import_hash,

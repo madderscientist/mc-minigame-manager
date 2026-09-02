@@ -4,22 +4,18 @@ import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import { api } from '../api/client'
+import CopyAddress from '../components/CopyAddress.vue'
 import EmptyState from '../components/EmptyState.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import TaskProgress from '../components/TaskProgress.vue'
 import { formatDate, runtimeLabels, toneForStatus } from '../utils/format'
 
 const statusQuery = useQuery({ queryKey: ['status'], queryFn: api.status, refetchInterval: 4000 })
-const gamesQuery = useQuery({ queryKey: ['games'], queryFn: api.games, refetchInterval: 5000 })
 const status = computed(() => statusQuery.data.value)
-const games = computed(() => gamesQuery.data.value ?? [])
 const freePorts = computed(() => status.value?.ports.filter((port) => port.state === 'free').length ?? 0)
 const activeTasks = computed(() => status.value?.tasks.filter((task) => ['pending', 'running'].includes(task.status)) ?? [])
 const failedTasks = computed(() => status.value?.tasks.filter((task) => task.status === 'failed').slice(0, 3) ?? [])
-const runningGames = computed(() => (status.value?.running_games ?? []).map((running) => ({
-  ...running,
-  game: games.value.find((game) => game.game_id === running.game_id),
-})))
+const runningGames = computed(() => status.value?.running_games ?? [])
 </script>
 
 <template>
@@ -60,10 +56,10 @@ const runningGames = computed(() => (status.value?.running_games ?? []).map((run
         <div class="panel-heading"><div><span class="section-index">01</span><h2>运行中的游戏</h2></div><RouterLink to="/games">查看全部 →</RouterLink></div>
         <div v-if="runningGames.length" class="running-list">
           <RouterLink v-for="item in runningGames" :key="item.game_id" :to="`/games/${item.game_id}`" class="running-row">
-            <div class="game-avatar">{{ item.game?.name.slice(0, 2).toUpperCase() ?? 'MC' }}</div>
-            <div class="running-name"><strong>{{ item.game?.name ?? `Game ${item.game_id}` }}</strong><span>#{{ item.game_id }} · {{ formatDate(item.game?.last_played_at) }}</span></div>
+            <div class="game-avatar">{{ item.game_name.slice(0, 2).toUpperCase() }}</div>
+            <div class="running-name"><strong>{{ item.game_name }}</strong><span>MC {{ item.mc_version }} · #{{ item.game_id }} · {{ formatDate(item.last_played_at) }}</span></div>
             <StatusBadge :label="runtimeLabels[item.observed_state]" :tone="toneForStatus(item.observed_state)" />
-            <code>:{{ item.port }}</code><span class="row-arrow">›</span>
+            <CopyAddress v-if="item.public_address" :address="item.public_address" /><code v-else>:{{ item.port }}</code><span class="row-arrow">›</span>
           </RouterLink>
         </div>
         <EmptyState v-else title="没有正在运行的游戏" description="从已创建的游戏中选择一个启动。" icon="◈">

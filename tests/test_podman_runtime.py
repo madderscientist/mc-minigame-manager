@@ -57,7 +57,23 @@ def test_podman_start_uses_rootless_safe_flags(tmp_path: Path) -> None:
     assert "--cap-drop" in run and "ALL" in run
     assert "no-new-privileges" in run
     assert "--restart" in run and "no" in run
+    assert "--log-driver" in run and "k8s-file" in run
     assert str(jar) + ":/opt/paper/paper.jar:ro" in run
+    assert "/tmp:rw,exec,nosuid,nodev,size=256m" in run
+    assert "-Duser.timezone=Asia/Shanghai" in run
+
+
+def test_wait_ready_accepts_paper_done_log(monkeypatch) -> None:
+    runtime = PodmanRuntime("podman")
+    monkeypatch.setattr(runtime, "_status", lambda _run_id: "running")
+    monkeypatch.setattr(
+        runtime,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, '[00:12:25 INFO]: Done (9.835s)! For help, type "help"', ""
+        ),
+    )
+    assert runtime.wait_ready("run-id", 30000, 1)
 
 
 def test_managed_run_ids_reads_labels(monkeypatch) -> None:

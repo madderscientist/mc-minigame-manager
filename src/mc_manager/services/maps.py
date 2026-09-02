@@ -1,11 +1,12 @@
+import hashlib
 import json
-import os
 import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from mc_manager.enums import ResourceState
@@ -13,7 +14,7 @@ from mc_manager.errors import ValidationError
 from mc_manager.models import MapRecord
 from mc_manager.services.archive import SafeZipExtractor
 from mc_manager.services.storage import Storage
-from mc_manager.services.versions import read_data_version
+from mc_manager.services.versions import read_data_version, required_java_major
 
 SAFE_RESOURCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 RESOURCE_PACK_STORAGE_NAME = "resource-pack.zip"
@@ -48,6 +49,18 @@ class MapService:
         self.extractor = extractor
         self.resource_pack_base_url = resource_pack_base_url
 
+    @staticmethod
+    def latest_reusable_paper_build(session: Session, mc_version: str) -> str | None:
+        builds = session.scalars(
+            select(MapRecord.paper_build).where(
+                MapRecord.state == ResourceState.READY,
+                MapRecord.mc_version == mc_version.strip(),
+                MapRecord.paper_url.is_(None),
+            )
+        ).all()
+        numeric_builds = [int(build) for build in builds if build.isdigit()]
+        return str(max(numeric_builds)) if numeric_builds else None
+
     def prepare_import(
         self,
         session: Session,
@@ -65,8 +78,15 @@ class MapService:
             raise ValidationError("name_required", "地图名称不能为空")
         if not mc_version.strip() or not paper_build.strip():
             raise ValidationError("runtime_metadata_required", "必须指定 MC 版本和 Paper build")
-        if java_major not in {8, 11, 16, 17, 21}:
-            raise ValidationError("java_unsupported", "Java 主版本不在允许列表中")
+        try:
+            expected_java_major = required_java_major(mc_version)
+        except ValueError as error:
+            raise ValidationError("mc_version_unsupported", str(error)) from error
+        if java_major != expected_java_major:
+            raise ValidationError(
+                "java_version_mismatch",
+                f"Minecraft {mc_version.strip()} 必须使用 Java {expected_java_major}",
+            )
         if paper_sha256 is not None and (
             len(paper_sha256) != 64
             or any(character not in "0123456789abcdefABCDEF" for character in paper_sha256)
@@ -101,7 +121,6 @@ class MapService:
         record: MapRecord,
         *,
         archive_path: Path,
-        resource_paths: list[Path],
         resource_pack: ResourcePackImport | None = None,
     ) -> MapRecord:
         destination = self.storage.resolve(record.relative_path)
@@ -110,20 +129,31 @@ class MapService:
             self.extractor.extract(archive_path, staging)
             self._unwrap_single_root(staging)
             self.extractor.validate_map_layout(staging)
+            bundled_resource_pack = staging / "resources.zip"
+            had_bundled_resource_pack = bundled_resource_pack.is_file()
             self._normalize_server_root(staging)
+            if had_bundled_resource_pack and not bundled_resource_pack.is_file():
+                bundled_resource_pack = staging / "world" / "resources.zip"
+            selected_resource_pack = resource_pack
+            if selected_resource_pack is None and bundled_resource_pack.is_file():
+                selected_resource_pack = self._resource_pack_import(bundled_resource_pack)
             record.data_version = read_data_version(staging)
-            resource_names = self._install_resources(staging, resource_paths)
             resource_pack_metadata = self._install_resource_pack(
-                staging, record.map_id, resource_pack
+                staging, record.map_id, selected_resource_pack
             )
+            if bundled_resource_pack.is_file():
+                bundled_resource_pack.unlink()
             digest, _ = self.storage.tree_digest(staging)
             record.content_sha256 = digest
             record.extra_metadata = {
-                "resources": resource_names,
                 "resource_pack": resource_pack_metadata,
             }
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(staging, destination)
+            self.storage.copy_tree_atomic(
+                staging,
+                destination,
+                prefix=f"publish-map-{record.map_id}",
+            )
+            shutil.rmtree(staging, ignore_errors=True)
             record.state = ResourceState.READY
             session.flush()
             return record
@@ -184,29 +214,6 @@ class MapService:
             encoding="utf-8",
         )
 
-    @staticmethod
-    def _install_resources(staging: Path, resource_paths: list[Path]) -> list[str]:
-        if not resource_paths:
-            return []
-        resource_dir = staging / ".mc-manager-resources"
-        resource_dir.mkdir(mode=0o750)
-        installed: list[str] = []
-        for source in resource_paths:
-            name = source.name
-            if not SAFE_RESOURCE_NAME.fullmatch(name):
-                raise ValidationError("resource_name_invalid", f"资源文件名不安全: {name}")
-            if name == RESOURCE_PACK_STORAGE_NAME:
-                raise ValidationError(
-                    "resource_name_reserved",
-                    f"普通附加资源不能使用保留文件名: {name}",
-                )
-            target = resource_dir / name
-            if target.exists():
-                raise ValidationError("resource_duplicate", f"资源文件重名: {name}")
-            shutil.copy2(source, target)
-            installed.append(name)
-        return installed
-
     def _install_resource_pack(
         self,
         staging: Path,
@@ -243,6 +250,24 @@ class MapService:
             encoding="utf-8",
         )
         return metadata
+
+    @staticmethod
+    def _resource_pack_import(path: Path) -> ResourcePackImport:
+        sha1 = hashlib.sha1(usedforsecurity=False)
+        sha256 = hashlib.sha256()
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                sha1.update(chunk)
+                sha256.update(chunk)
+        return ResourcePackImport(
+            path=path,
+            filename="resources.zip",
+            sha1=sha1.hexdigest(),
+            sha256=sha256.hexdigest(),
+            size_bytes=path.stat().st_size,
+            required=False,
+            prompt=None,
+        )
 
     def describe_resource_pack(
         self, map_id: int, resource_pack: ResourcePackImport

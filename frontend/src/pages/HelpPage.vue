@@ -54,10 +54,11 @@ sudo bash scripts/install-wsl.sh</code><button @click="copy('bash scripts/init-c
             <div class="config-row"><code>MC_API_TOKEN</code><span>解锁管理台的 Bearer Token</span><span>使用脚本生成的长随机值</span></div>
             <div class="config-row"><code>MC_STORAGE_ROOT</code><span>Map、Game、Backup 和制品根目录</span><span>保持在 WSL ext4，不要放 /mnt/c</span></div>
             <div class="config-row"><code>MC_PORT_MIN / MAX</code><span>游戏端口池</span><span>必须与 frpc 端口范围一致</span></div>
+            <div class="config-row"><code>MC_PUBLIC_GAME_HOST / PORT_MIN</code><span>公网游戏地址与远端端口池首端口</span><span>用于前端显示可复制连接地址</span></div>
             <div class="config-row"><code>MC_BACKUP_LIMIT</code><span>每个 Game 的备份上限</span><span>默认 10，根据磁盘调整</span></div>
             <div class="config-row"><code>MC_RUNTIME_BACKEND</code><span>Paper 运行后端</span><span>生产保持 podman</span></div>
             <div class="config-row"><code>MC_JAVA_IMAGES_JSON</code><span>Java 主版本到容器镜像的映射</span><span>生产建议固定镜像 digest</span></div>
-            <div class="config-row"><code>MC_MAX_UPLOAD_BYTES</code><span>地图和附加资源压缩包总大小</span><span>默认 2 GiB</span></div>
+            <div class="config-row"><code>MC_MAX_UPLOAD_BYTES</code><span>地图和玩家资源包上传总大小</span><span>默认 2 GiB</span></div>
             <div class="config-row"><code>MC_RESOURCE_PACK_BASE_URL</code><span>玩家可访问的资源包 HTTP(S) 根地址</span><span>例如 https://packs.example.com</span></div>
           </div>
           <div class="command multiline"><code>sudo bash scripts/install-wsl.sh

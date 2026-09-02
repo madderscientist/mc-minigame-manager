@@ -15,7 +15,7 @@ defineProps<{ compact?: boolean }>()
       </div>
       <div>
         <b>02 · 版本信息</b>
-        <p>必须填写准确的 Minecraft 版本和 Paper build。DataVersion 只用于核验，不会自动猜版本。</p>
+        <p>版本会优先从文件名或地图名称识别，也可手动修改；系统自动选择 Paper build 和 Java。</p>
       </div>
       <div>
         <b>03 · 默认容量限制</b>
@@ -28,14 +28,14 @@ defineProps<{ compact?: boolean }>()
     </div>
     <div class="requirements-warning">
       <strong>只上传可信内容</strong>
-      <span>服务端目录中的插件 JAR 会在 Paper 启动时执行。显式选择的单个“玩家资源包”会由 Paper 提示玩家下载；普通附加资源只归档，不会安装、合并或下发。</span>
+      <span>服务端目录中的插件 JAR 会在 Paper 启动时执行。显式选择的“玩家资源包”会由 Paper 提示玩家下载。</span>
     </div>
     <ul v-if="!compact" class="requirements-notes">
       <li>若上传的是裸世界，系统会放入 <code>world/</code>；若是完整服务端目录，世界目录应直接位于压缩包一级。</li>
       <li>系统会固定 <code>server-port=25565</code> 并设置正确的 <code>level-name</code>；外部端口由端口池分配。</li>
-      <li>玩家资源包必须是 ZIP，且根目录直接包含有效的 <code>pack.mcmeta</code>；不支持多个资源包自动合并。</li>
+      <li>玩家资源包必须是 ZIP，且根目录直接包含有效的 <code>pack.mcmeta</code>。未单独上传时会使用地图根目录的 <code>resources.zip</code>；显式上传优先。</li>
       <li>系统会计算 Minecraft 使用的 SHA-1 并写入 <code>server.properties</code>。玩家下载 URL 必须已通过 <code>MC_RESOURCE_PACK_BASE_URL</code> 配置且公网可达。</li>
-      <li>不填写自定义 Paper URL 时，系统会按精确版本和 build 从 PaperMC 获取稳定制品并校验 SHA-256。</li>
+      <li>同版本默认复用仓库中最高的标准 Paper build；没有匹配时从 PaperMC 选择最新稳定 build。高级设置可覆盖。</li>
       <li>自定义 Paper URL 与 SHA-256 必须同时填写，且下载主机必须在后端允许列表中。</li>
     </ul>
   </section>

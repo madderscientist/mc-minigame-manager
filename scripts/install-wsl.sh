@@ -249,6 +249,10 @@ else
   echo "生产 Python 包未变化，跳过 pip 安装。"
 fi
 
+# 脚本使用 umask 077 保护配置，但生产虚拟环境需要由 API 和 Worker 两个
+# 非 root 服务账号共同读取和执行。保留现有可执行位，只补齐遍历与读取权限。
+chmod -R a+rX "$VENV_DIR"
+
 ensure_env_default() {
   local file=$1
   local key=$2

@@ -5,6 +5,7 @@ import { RouterLink, useRouter } from 'vue-router'
 
 import { api, ApiError } from '../api/client'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import CopyAddress from '../components/CopyAddress.vue'
 import CreateGameDialog from '../components/CreateGameDialog.vue'
 import EmptyState from '../components/EmptyState.vue'
 import StatusBadge from '../components/StatusBadge.vue'
@@ -89,11 +90,11 @@ async function stop() {
     </div>
     <section class="panel table-panel">
       <div v-if="filtered.length" class="data-table game-table">
-        <div class="table-row table-head"><span>游戏</span><span>状态</span><span>端口</span><span>最后游玩</span><span>备份</span><span>操作</span></div>
+        <div class="table-row table-head"><span>游戏</span><span>状态</span><span>连接地址</span><span>最后游玩</span><span>备份</span><span>操作</span></div>
         <div v-for="game in filtered" :key="game.game_id" class="table-row">
-          <RouterLink :to="`/games/${game.game_id}`" class="entity-name"><div class="game-avatar">{{ game.name.slice(0,2).toUpperCase() }}</div><div><strong>{{ game.name }}</strong><small>Game #{{ game.game_id }} · Map #{{ game.map_id }}</small></div></RouterLink>
+          <RouterLink :to="`/games/${game.game_id}`" class="entity-name"><div class="game-avatar">{{ game.name.slice(0,2).toUpperCase() }}</div><div><strong>{{ game.name }}</strong><small>MC {{ game.mc_version }} · Map #{{ game.map_id }}</small></div></RouterLink>
           <StatusBadge :label="statusText(game)" :tone="toneForStatus(game.runtime_state ?? game.state)" />
-          <code>{{ game.port ? `:${game.port}` : '自动' }}</code>
+          <CopyAddress v-if="game.public_address" :address="game.public_address" /><span v-else class="muted-value">未运行</span>
           <span>{{ formatDate(game.last_played_at) }}</span><span>{{ game.backups.length }} 个</span>
           <div class="row-actions">
             <button v-if="game.state === 'ready' && (!game.runtime_state || ['stopped','failed'].includes(game.runtime_state))" class="button small primary" @click="startTarget=game">启动</button>

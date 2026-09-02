@@ -17,6 +17,44 @@ class PaperArtifact:
     sha256: str
 
 
+def _fetch_paper_builds(mc_version: str, user_agent: str) -> list[Any]:
+    endpoint = f"https://fill.papermc.io/v3/projects/paper/versions/{mc_version}/builds"
+    try:
+        response = httpx.get(
+            endpoint,
+            headers={"User-Agent": user_agent, "Accept": "application/json"},
+            timeout=30,
+            follow_redirects=False,
+        )
+        if response.is_redirect:
+            raise ValidationError("papermc_redirect_rejected", "拒绝 PaperMC API 重定向")
+        response.raise_for_status()
+    except httpx.HTTPError as error:
+        raise ValidationError("papermc_unavailable", "暂时无法查询 PaperMC build") from error
+    payload: Any = response.json()
+    if not isinstance(payload, list):
+        raise ValidationError("papermc_response_invalid", "PaperMC 返回格式无效")
+    return payload
+
+
+def latest_stable_paper_build(mc_version: str, *, user_agent: str) -> str:
+    builds = _fetch_paper_builds(mc_version, user_agent)
+    stable_ids = [
+        int(item["id"])
+        for item in builds
+        if isinstance(item, dict)
+        and item.get("channel") == "STABLE"
+        and str(item.get("id", "")).isdigit()
+        and isinstance(item.get("downloads"), dict)
+        and "server:default" in item["downloads"]
+    ]
+    if not stable_ids:
+        raise ValidationError(
+            "paper_build_not_found", "该 Minecraft 版本没有可用的稳定 Paper build"
+        )
+    return str(max(stable_ids))
+
+
 class ArtifactManager:
     def __init__(
         self,
@@ -35,19 +73,7 @@ class ArtifactManager:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def resolve_paper(self, mc_version: str, paper_build: str) -> PaperArtifact:
-        endpoint = f"https://fill.papermc.io/v3/projects/paper/versions/{mc_version}/builds"
-        response = httpx.get(
-            endpoint,
-            headers={"User-Agent": self.user_agent, "Accept": "application/json"},
-            timeout=30,
-            follow_redirects=False,
-        )
-        if response.is_redirect:
-            raise ValidationError("papermc_redirect_rejected", "拒绝 PaperMC API 重定向")
-        response.raise_for_status()
-        payload: Any = response.json()
-        if not isinstance(payload, list):
-            raise ValidationError("papermc_response_invalid", "PaperMC 返回格式无效")
+        payload = _fetch_paper_builds(mc_version, self.user_agent)
         build = next(
             (
                 item

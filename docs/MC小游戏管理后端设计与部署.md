@@ -129,19 +129,19 @@ Idempotency-Key: <客户端生成的唯一值>
 - `map` 或 `map.zip`：地图压缩包；
 - `name`：名称；
 - `mc_version`：精确 Minecraft 版本；
-- `paper_build`：固定 Paper build；
-- `java_major`：Java 主版本，默认 17；
+- `paper_build`：可选的固定 Paper build；留空时优先复用仓库内同一 `mc_version` 最高的标准 build，没有匹配项才查询 PaperMC 最新稳定 build，并将精确编号固化到 Map；
+- Java 主版本不由客户端提交，而是根据 Paper 官方兼容表从 `mc_version` 自动确定；
 - `paper_url` 与 `paper_sha256`：可选的成对自定义制品；
 - `resource_pack`：可选的单个玩家资源包 ZIP；
 - `resource_pack_required`：玩家拒绝资源包时是否拒绝进入，默认 false；
 - `resource_pack_prompt`：可选原生下载提示，最多 256 字符；
-- 其他文件字段：随地图保存的资源文件。
 
 玩家资源包必须在 ZIP 根目录包含有效 `pack.mcmeta`，压缩包最多 250 MiB。后端计算
 Minecraft 协议使用的 SHA-1 和内部校验用 SHA-256，随后写入 `resource-pack`、
 `resource-pack-sha1`、`require-resource-pack` 及可选 `resource-pack-prompt`。上传地图自带的
-旧资源包 URL 会被清除，避免继承不受信任的外链。原生协议一次只支持一个资源包，系统
-不会自动合并多个 ZIP。
+旧资源包 URL 会被清除，避免继承不受信任的外链。地图根目录存在 `resources.zip` 时会
+自动将其作为玩家资源包；如果同时显式上传资源包，则使用显式上传版本。系统不自动合并
+多个 ZIP。
 
 下载端点为 `GET /resource-packs/maps/{map_id}/{sha1}/{filename}`。该端点故意位于
 `/api` 外且不要求管理 Token，否则 Minecraft 客户端无法下载；响应使用内容哈希 URL、
@@ -361,6 +361,8 @@ frps:30000 → frpc → WSL 127.0.0.1:30000 → Paper:25565
 ```
 
 启动和停止 Game 不修改 frpc 配置。只有管理员调整整个端口池时才验证并 reload。`remotePort` 位于 frps 主机，必须同时配置 frps `allowPorts`、操作系统防火墙和云安全组。
+
+后端通过 `MC_PUBLIC_GAME_HOST` 和 `MC_PUBLIC_GAME_PORT_MIN` 将本地租约端口换算为公网连接地址。两个端口范围必须等长，前端直接显示并允许复制后端返回的 `public_address`，不硬编码部署域名。
 
 frpc 模板保存在 `deploy/frp/frpc.toml.example`。执行 `scripts/init-config.sh` 后，在项目
 `config/frpc.toml` 中填写真实参数和 `auth.token`，再由安装脚本部署后启用。

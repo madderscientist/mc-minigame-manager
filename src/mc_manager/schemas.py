@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mc_manager.enums import (
     ObservedState,
@@ -12,7 +12,16 @@ from mc_manager.enums import (
 )
 
 
-class BackupView(BaseModel):
+class ApiModel(BaseModel):
+    @field_validator("*", mode="after", check_fields=False)
+    @classmethod
+    def attach_utc_timezone(cls, value: Any) -> Any:
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return value
+
+
+class BackupView(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     backup_id: str
@@ -23,7 +32,7 @@ class BackupView(BaseModel):
     created_at: datetime
 
 
-class ResourcePackView(BaseModel):
+class ResourcePackView(ApiModel):
     filename: str
     sha1: str
     sha256: str
@@ -34,7 +43,7 @@ class ResourcePackView(BaseModel):
     url: str
 
 
-class MapView(BaseModel):
+class MapView(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     map_id: int
@@ -48,50 +57,53 @@ class MapView(BaseModel):
     resource_pack: ResourcePackView | None
 
 
-class GameView(BaseModel):
+class GameView(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     game_id: int
     map_id: int
+    map_name: str
+    mc_version: str
+    paper_build: str
+    java_major: int
     state: ResourceState
     name: str
     created_at: datetime
     last_played_at: datetime | None
     runtime_state: ObservedState | None = None
     port: int | None = None
-    backups: list[BackupView] = Field(
-        default_factory=list, validation_alias="retained_backups"
-    )
+    public_address: str | None = None
+    backups: list[BackupView] = Field(default_factory=list)
 
 
-class CreateGameRequest(BaseModel):
+class CreateGameRequest(ApiModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     map_id: int = Field(gt=0)
     name: str | None = Field(default=None, min_length=1, max_length=255)
 
 
-class StartRequest(BaseModel):
+class StartRequest(ApiModel):
     model_config = ConfigDict(extra="forbid")
 
     game_id: int = Field(gt=0)
     port: int | None = Field(default=None, ge=1024, le=65535)
 
 
-class StopRequest(BaseModel):
+class StopRequest(ApiModel):
     model_config = ConfigDict(extra="forbid")
 
     game_id: int = Field(gt=0)
 
 
-class LoadRequest(BaseModel):
+class LoadRequest(ApiModel):
     model_config = ConfigDict(extra="forbid")
 
     game_id: int = Field(gt=0)
     backup_id: str = Field(min_length=10, max_length=32)
 
 
-class TaskView(BaseModel):
+class TaskView(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     task_id: str
@@ -111,64 +123,67 @@ class TaskView(BaseModel):
     finished_at: datetime | None
 
 
-class CreateGameAccepted(BaseModel):
+class CreateGameAccepted(ApiModel):
     task_id: str
     game_id: int
     map_id: int
     status: TaskStatus = TaskStatus.PENDING
 
 
-class StartAccepted(BaseModel):
+class StartAccepted(ApiModel):
     task_id: str
     game_id: int
     port: int
     status: TaskStatus = TaskStatus.PENDING
 
 
-class StopAccepted(BaseModel):
+class StopAccepted(ApiModel):
     task_id: str
     game_id: int
     status: TaskStatus = TaskStatus.PENDING
 
 
-class DeleteGameAccepted(BaseModel):
+class DeleteGameAccepted(ApiModel):
     task_id: str
     game_id: int
     status: TaskStatus = TaskStatus.PENDING
 
 
-class LoadAccepted(BaseModel):
+class LoadAccepted(ApiModel):
     task_id: str
     game_id: int
     backup_id: str
     status: TaskStatus = TaskStatus.PENDING
 
 
-class RunningGameView(BaseModel):
+class RunningGameView(ApiModel):
     game_id: int
+    game_name: str
+    mc_version: str
+    last_played_at: datetime | None
     observed_state: ObservedState
     port: int
+    public_address: str | None
     last_error: str | None
 
 
-class PortView(BaseModel):
+class PortView(ApiModel):
     port: int
     state: PortState
     game_id: int | None
 
 
-class StatusView(BaseModel):
+class StatusView(ApiModel):
     running_games: list[RunningGameView]
     tasks: list[TaskView]
     ports: list[PortView]
 
 
-class UploadResult(BaseModel):
+class UploadResult(ApiModel):
     map_id: int
     name: str
     mc_version: str
-    resources: list[str]
 
 
-class ErrorBody(BaseModel):
+class ErrorBody(ApiModel):
     error: dict[str, Any]

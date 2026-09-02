@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     storage_root: Path = Path("./var/storage")
     port_min: int = Field(default=30000, ge=1024, le=65535)
     port_max: int = Field(default=30099, ge=1024, le=65535)
+    public_game_host: str | None = None
+    public_game_port_min: int | None = Field(default=None, ge=1, le=65535)
     backup_limit: int = Field(default=10, ge=1, le=1000)
     runtime_backend: str = "fake"
     api_token: SecretStr | None = None
@@ -53,7 +55,7 @@ class Settings(BaseSettings):
     java_images_json: str = (
         '{"8":"eclipse-temurin:8-jre","11":"eclipse-temurin:11-jre",'
         '"16":"eclipse-temurin:16-jre","17":"eclipse-temurin:17-jre",'
-        '"21":"eclipse-temurin:21-jre"}'
+        '"21":"eclipse-temurin:21-jre","25":"eclipse-temurin:25-jre"}'
     )
     container_memory: str = "2g"
     container_cpus: float = Field(default=2.0, gt=0)
@@ -62,7 +64,38 @@ class Settings(BaseSettings):
     def validate_port_range(self) -> Self:
         if self.port_min > self.port_max:
             raise ValueError("MC_PORT_MIN must be less than or equal to MC_PORT_MAX")
+        if (self.public_game_host is None) != (self.public_game_port_min is None):
+            raise ValueError(
+                "MC_PUBLIC_GAME_HOST and MC_PUBLIC_GAME_PORT_MIN must be configured together"
+            )
+        if self.public_game_port_min is not None:
+            public_port_max = self.public_game_port_min + self.port_max - self.port_min
+            if public_port_max > 65535:
+                raise ValueError("public game port range must not exceed 65535")
         return self
+
+    @field_validator("public_game_host")
+    @classmethod
+    def validate_public_game_host(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        host = value.strip()
+        if "://" in host or any(character.isspace() for character in host):
+            raise ValueError("MC_PUBLIC_GAME_HOST must be a hostname or IP without a scheme")
+        return host
+
+    def public_game_address(self, local_port: int) -> str | None:
+        if self.public_game_host is None or self.public_game_port_min is None:
+            return None
+        if not self.port_min <= local_port <= self.port_max:
+            return None
+        public_port = self.public_game_port_min + local_port - self.port_min
+        host = (
+            f"[{self.public_game_host}]"
+            if ":" in self.public_game_host
+            else self.public_game_host
+        )
+        return f"{host}:{public_port}"
 
     @field_validator("resource_pack_base_url")
     @classmethod
