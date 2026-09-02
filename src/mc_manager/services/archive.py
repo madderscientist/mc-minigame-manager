@@ -29,7 +29,17 @@ class SafeZipExtractor:
                 infos = bundle.infolist()
                 if len(infos) > self.settings.max_archive_files:
                     raise ValidationError("too_many_files", "压缩包文件数量超过限制")
-                total = 0
+                total = sum(info.file_size for info in infos)
+                compressed_total = sum(info.compress_size for info in infos)
+                if total > self.settings.max_extracted_bytes:
+                    raise ValidationError("archive_too_large", "压缩包展开后超过总大小限制")
+                ratio = total / max(compressed_total, 1)
+                if ratio > self.settings.max_compression_ratio:
+                    raise ValidationError(
+                        "compression_bomb",
+                        f"ZIP 总压缩比 {ratio:.1f} 超过安全限制 "
+                        f"{self.settings.max_compression_ratio:g}",
+                    )
                 for info in infos:
                     relative = self._validate_name(info.filename)
                     mode = info.external_attr >> 16
@@ -42,15 +52,6 @@ class SafeZipExtractor:
                         raise ValidationError(
                             "file_too_large", f"文件超过大小限制: {info.filename}"
                         )
-                    total += info.file_size
-                    if total > self.settings.max_extracted_bytes:
-                        raise ValidationError("archive_too_large", "压缩包展开后超过总大小限制")
-                    if info.compress_size == 0:
-                        ratio = float("inf") if info.file_size else 1.0
-                    else:
-                        ratio = info.file_size / info.compress_size
-                    if ratio > self.settings.max_compression_ratio:
-                        raise ValidationError("compression_bomb", "压缩比超过安全限制")
 
                     target = destination.joinpath(*relative.parts)
                     if info.is_dir():
@@ -80,6 +81,7 @@ class SafeZipExtractor:
                 raise ValidationError("too_many_files", "资源包文件数量超过限制")
             metadata_entries: list[zipfile.ZipInfo] = []
             total = 0
+            compressed_total = 0
             for info in infos:
                 relative = self._validate_name(info.filename)
                 if info.flag_bits & 0x1:
@@ -93,17 +95,19 @@ class SafeZipExtractor:
                 if file_type not in {0, stat.S_IFREG, stat.S_IFDIR}:
                     raise ValidationError("special_file_not_allowed", "资源包中禁止特殊文件")
                 total += info.file_size
+                compressed_total += info.compress_size
                 if total > self.settings.max_extracted_bytes:
                     raise ValidationError("resource_pack_expanded_too_large", "资源包展开后过大")
-                ratio = (
-                    float("inf")
-                    if info.compress_size == 0 and info.file_size
-                    else info.file_size / max(info.compress_size, 1)
-                )
-                if ratio > self.settings.max_compression_ratio:
-                    raise ValidationError("compression_bomb", "资源包压缩比超过安全限制")
                 if relative.parts == ("pack.mcmeta",):
                     metadata_entries.append(info)
+
+            ratio = total / max(compressed_total, 1)
+            if ratio > self.settings.max_compression_ratio:
+                raise ValidationError(
+                    "compression_bomb",
+                    f"资源包 ZIP 总压缩比 {ratio:.1f} 超过安全限制 "
+                    f"{self.settings.max_compression_ratio:g}",
+                )
 
             if len(metadata_entries) != 1:
                 raise ValidationError(

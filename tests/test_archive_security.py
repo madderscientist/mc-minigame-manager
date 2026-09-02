@@ -1,4 +1,5 @@
 import io
+import random
 import stat
 import zipfile
 from pathlib import Path
@@ -45,6 +46,31 @@ def test_validates_resource_pack_metadata(tmp_path: Path, settings: Settings) ->
     source = tmp_path / "pack.zip"
     source.write_bytes(make_resource_pack_zip(pack_format=22))
     assert SafeZipExtractor(settings).validate_resource_pack(source) == 22
+
+
+def test_accepts_highly_compressible_file_in_normal_map(
+    tmp_path: Path, settings: Settings
+) -> None:
+    source = tmp_path / "normal-map.zip"
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("level.dat", random.Random(0).randbytes(256 * 1024))
+        archive.writestr(
+            "datapacks/functions.mcfunction",
+            b"scoreboard players add @s x 1\n" * 20_000,
+        )
+    destination = tmp_path / "out"
+    SafeZipExtractor(settings).extract(source, destination)
+    assert (destination / "level.dat").is_file()
+
+
+def test_rejects_archive_with_excessive_total_compression_ratio(
+    tmp_path: Path, settings: Settings
+) -> None:
+    source = tmp_path / "bomb.zip"
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("level.dat", b"0" * 2 * 1024 * 1024)
+    with pytest.raises(ValidationError, match="ZIP 总压缩比"):
+        SafeZipExtractor(settings).extract(source, tmp_path / "out")
 
 
 @pytest.mark.parametrize(
