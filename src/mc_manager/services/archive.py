@@ -121,7 +121,7 @@ class SafeZipExtractor:
             if metadata_info.file_size > 1024 * 1024:
                 raise ValidationError("resource_pack_metadata_too_large", "pack.mcmeta 过大")
             try:
-                metadata = json.loads(bundle.read(metadata_info).decode("utf-8"))
+                metadata = json.loads(bundle.read(metadata_info).decode("utf-8-sig"))
                 pack_format = metadata["pack"]["pack_format"]
             except (
                 KeyError,

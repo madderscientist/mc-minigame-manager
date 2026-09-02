@@ -57,6 +57,19 @@ def test_validates_resource_pack_metadata(tmp_path: Path, settings: Settings) ->
     assert SafeZipExtractor(settings).validate_resource_pack(source) == 22
 
 
+def test_accepts_utf8_bom_resource_pack_metadata(
+    tmp_path: Path, settings: Settings
+) -> None:
+    source = tmp_path / "bom-pack.zip"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr(
+            "pack.mcmeta",
+            b'\xef\xbb\xbf{"pack":{"pack_format":7,"description":"Map pack"}}',
+        )
+
+    assert SafeZipExtractor(settings).validate_resource_pack(source) == 7
+
+
 def test_accepts_highly_compressible_file_in_normal_map(
     tmp_path: Path, settings: Settings
 ) -> None:
