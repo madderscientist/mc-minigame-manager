@@ -103,7 +103,7 @@ export interface Status {
 }
 
 export interface ApiErrorBody {
-  error: {
+  error?: {
     code: string
     message: string
     details: Record<string, unknown>
@@ -122,13 +122,19 @@ export interface TaskAccepted {
 export interface MapUploadInput {
   mapFile: File
   name: string
-  mcVersion: string
   paperBuild?: string
   resourcePack?: File
   resourcePackRequired?: boolean
   resourcePackPrompt?: string
   paperUrl?: string
   paperSha256?: string
+  signal?: AbortSignal
+}
+
+export interface ChunkedUploadCreated {
+  upload_id: string
+  chunk_size: number
+  completed: boolean
 }
 
 export interface MapUploadResult {

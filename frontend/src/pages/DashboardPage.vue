@@ -6,6 +6,7 @@ import { RouterLink } from 'vue-router'
 import { api } from '../api/client'
 import CopyAddress from '../components/CopyAddress.vue'
 import EmptyState from '../components/EmptyState.vue'
+import QueryError from '../components/QueryError.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import TaskProgress from '../components/TaskProgress.vue'
 import { formatDate, runtimeLabels, toneForStatus } from '../utils/format'
@@ -32,6 +33,8 @@ const runningGames = computed(() => status.value?.running_games ?? [])
       </div>
     </header>
 
+    <QueryError v-if="statusQuery.isError.value" :error="statusQuery.error.value" @retry="statusQuery.refetch()" />
+    <template v-else>
     <section class="metric-grid">
       <article class="metric-card accent-card">
         <span class="metric-kicker">RUNNING</span><strong>{{ runningGames.length }}</strong><p>正在运行的游戏</p>
@@ -80,5 +83,6 @@ const runningGames = computed(() => status.value?.running_games ?? [])
       <div class="panel-heading"><div><span class="section-index">03</span><h2>需要处理</h2></div></div>
       <TaskProgress v-for="task in failedTasks" :key="task.task_id" :task="task" compact />
     </section>
+    </template>
   </div>
 </template>

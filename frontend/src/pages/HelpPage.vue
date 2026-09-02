@@ -1,5 +1,8 @@
 <script setup lang="ts">
+import { ref } from 'vue'
+
 import MapRequirements from '../components/MapRequirements.vue'
+import { copyText } from '../utils/clipboard'
 
 const sections = [
   { id: 'install', label: '首次安装' },
@@ -10,8 +13,15 @@ const sections = [
   { id: 'troubleshooting', label: '故障排查' },
 ]
 
-function copy(text: string) {
-  void navigator.clipboard.writeText(text)
+const copyError = ref('')
+
+async function copy(text: string) {
+  try {
+    await copyText(text)
+    copyError.value = ''
+  } catch {
+    copyError.value = '复制失败，请手动选择命令文本。'
+  }
 }
 </script>
 
@@ -21,6 +31,7 @@ function copy(text: string) {
       <div><div class="eyebrow">Step-by-step guide</div><h1>配置与使用教程</h1><p>从一台新 WSL 到上传地图、开服、停服和恢复备份。</p></div>
       <a class="button ghost" href="/docs" target="_blank">OpenAPI 文档 ↗</a>
     </header>
+    <p v-if="copyError" class="inline-error">{{ copyError }}</p>
 
     <div class="help-layout">
       <aside class="help-toc panel">
@@ -59,6 +70,8 @@ sudo bash scripts/install-wsl.sh</code><button @click="copy('bash scripts/init-c
             <div class="config-row"><code>MC_RUNTIME_BACKEND</code><span>Paper 运行后端</span><span>生产保持 podman</span></div>
             <div class="config-row"><code>MC_JAVA_IMAGES_JSON</code><span>Java 主版本到容器镜像的映射</span><span>生产建议固定镜像 digest</span></div>
             <div class="config-row"><code>MC_MAX_UPLOAD_BYTES</code><span>地图和玩家资源包上传总大小</span><span>默认 2 GiB</span></div>
+            <div class="config-row"><code>MC_MAX_UPLOAD_SESSIONS</code><span>同时保留的未完成分片会话数</span><span>默认 8</span></div>
+            <div class="config-row"><code>MC_MAX_UPLOAD_RESERVED_BYTES</code><span>全部未完成上传的逻辑预留空间</span><span>默认 8 GiB</span></div>
             <div class="config-row"><code>MC_RESOURCE_PACK_BASE_URL</code><span>玩家可访问的资源包 HTTP(S) 根地址</span><span>例如 https://packs.example.com</span></div>
           </div>
           <div class="command multiline"><code>sudo bash scripts/install-wsl.sh
@@ -87,7 +100,7 @@ systemctl status frpc</code><button @click="copy('sudo bash scripts/install-wsl.
         <section id="usage" class="guide-section panel">
           <div class="guide-heading"><span>04</span><div><div class="eyebrow">Daily workflow</div><h2>日常使用流程</h2></div></div>
           <div class="workflow-grid">
-            <article><span>1</span><h3>上传 Map</h3><p>上传 <code>map.zip</code> 并填写运行版本；若有客户端材质，单独选择一个“玩家资源包”，可设置必须接受和提示语。</p></article>
+            <article><span>1</span><h3>上传 Map</h3><p>上传 <code>map.zip</code>，系统从 <code>level.dat</code> 自动识别版本；若有客户端材质，可单独选择一个“玩家资源包”。</p></article>
             <article><span>2</span><h3>创建 Game</h3><p>在 Map 卡片上点击“创建游戏”。这一步只复制持久数据，不启动 Paper、不占端口。</p></article>
             <article><span>3</span><h3>启动 Game</h3><p>进入“游戏”，点击启动。推荐自动分配端口；等待任务显示 Paper 已就绪。</p></article>
             <article><span>4</span><h3>玩家连接</h3><p>本机测试连接 WSL 地址与端口；启用 FRP 后连接公网 frps 地址和相同端口。</p></article>

@@ -62,3 +62,8 @@ def test_rejects_non_public_resource_pack_url(url: str) -> None:
 def test_accepts_public_resource_pack_url() -> None:
     settings = Settings(resource_pack_base_url="https://packs.example.com/base/")
     assert settings.resource_pack_base_url == "https://packs.example.com/base"
+
+
+def test_upload_reservation_must_fit_one_maximum_upload() -> None:
+    with pytest.raises(ValidationError, match="MC_MAX_UPLOAD_RESERVED_BYTES"):
+        Settings(max_upload_bytes=1024, max_upload_reserved_bytes=512)

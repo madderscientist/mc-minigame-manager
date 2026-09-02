@@ -57,7 +57,14 @@ class PodmanRuntime(RuntimeBackend):
             check=False,
         )
         if result.returncode != 0:
-            return None
+            exists = self._run(
+                ["container", "exists", self._name(run_id)],
+                check=False,
+            )
+            if exists.returncode == 1:
+                return None
+            message = result.stderr.strip() or result.stdout.strip() or "inspect failed"
+            raise PodmanError(f"podman inspect: {message}")
         payload: Any = json.loads(result.stdout)
         if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
             raise PodmanError("podman inspect returned an invalid response")
@@ -163,9 +170,7 @@ class PodmanRuntime(RuntimeBackend):
         state = details.get("State", {})
         status = str(state.get("Status", "")).lower()
         if status in {"exited", "stopped"}:
-            graceful = int(state.get("ExitCode", 1)) == 0 and not bool(
-                state.get("OOMKilled", False)
-            )
+            graceful = self._is_graceful_exit(state)
             self._run(["rm", "--force", self._name(run_id)], check=False)
             return graceful
 
@@ -179,8 +184,13 @@ class PodmanRuntime(RuntimeBackend):
             if current_status is None:
                 return True
             if current_status in {"exited", "stopped"}:
+                final_details = self._inspect(run_id)
+                final_state = (
+                    final_details.get("State", {}) if final_details is not None else {}
+                )
+                graceful = self._is_graceful_exit(final_state)
                 self._run(["rm", self._name(run_id)], check=False)
-                return True
+                return graceful
             time.sleep(0.25)
 
         self._run(
@@ -189,6 +199,12 @@ class PodmanRuntime(RuntimeBackend):
         )
         self._run(["rm", "--force", self._name(run_id)], check=False)
         return False
+
+    @staticmethod
+    def _is_graceful_exit(state: dict[str, Any]) -> bool:
+        return int(state.get("ExitCode", 1)) in {0, 128 + 15} and not bool(
+            state.get("OOMKilled", False)
+        )
 
     def exists(self, run_id: str) -> bool:
         return self._status(run_id) in {"created", "running", "restarting", "paused"}

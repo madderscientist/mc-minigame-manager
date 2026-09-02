@@ -1,15 +1,21 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref } from 'vue'
 
+import { copyText } from '../utils/clipboard'
+
 const props = defineProps<{ address: string }>()
-const copied = ref(false)
+const state = ref<'idle' | 'copied' | 'failed'>('idle')
 let resetTimer: number | undefined
 
 async function copyAddress() {
-  await navigator.clipboard.writeText(props.address)
-  copied.value = true
+  try {
+    await copyText(props.address)
+    state.value = 'copied'
+  } catch {
+    state.value = 'failed'
+  }
   window.clearTimeout(resetTimer)
-  resetTimer = window.setTimeout(() => { copied.value = false }, 1600)
+  resetTimer = window.setTimeout(() => { state.value = 'idle' }, 1600)
 }
 
 onBeforeUnmount(() => window.clearTimeout(resetTimer))
@@ -17,6 +23,6 @@ onBeforeUnmount(() => window.clearTimeout(resetTimer))
 
 <template>
   <span class="copy-address" role="button" tabindex="0" :title="`复制 ${address}`" @click.prevent.stop="copyAddress" @keydown.enter.prevent.stop="copyAddress" @keydown.space.prevent.stop="copyAddress">
-    <code>{{ address }}</code><span>{{ copied ? '已复制' : '复制' }}</span>
+    <code>{{ address }}</code><span>{{ state === 'copied' ? '已复制' : state === 'failed' ? '复制失败' : '复制' }}</span>
   </span>
 </template>

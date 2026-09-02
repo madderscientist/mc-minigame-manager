@@ -14,11 +14,13 @@ const emit = defineEmits<{ close: []; confirm: [] }>()
 const input = ref('')
 const canConfirm = computed(() => !props.confirmText || input.value === props.confirmText)
 watch(() => props.open, (value) => { if (value) input.value = '' })
+function close() { if (!props.busy) emit('close') }
+function confirm() { if (!props.busy && canConfirm.value) emit('confirm') }
 </script>
 
 <template>
   <Teleport to="body">
-    <div v-if="open" class="dialog-backdrop" @click.self="emit('close')">
+    <div v-if="open" class="dialog-backdrop" @click.self="close">
       <section class="dialog-card" role="dialog" aria-modal="true" :aria-label="title">
         <div class="dialog-icon" :class="danger ? 'danger' : ''">{{ danger ? '!' : '→' }}</div>
         <h2>{{ title }}</h2>
@@ -28,12 +30,12 @@ watch(() => props.open, (value) => { if (value) input.value = '' })
           <input v-model="input" autocomplete="off" />
         </label>
         <div class="dialog-actions">
-          <button class="button ghost" :disabled="busy" @click="emit('close')">取消</button>
+          <button class="button ghost" :disabled="busy" @click="close">取消</button>
           <button
             class="button"
             :class="danger ? 'danger' : 'primary'"
             :disabled="!canConfirm || busy"
-            @click="emit('confirm')"
+            @click="confirm"
           >
             {{ busy ? '处理中…' : (confirmLabel ?? '确认') }}
           </button>

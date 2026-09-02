@@ -29,6 +29,10 @@ from mc_manager.runtime.base import RuntimeSpec
 from mc_manager.services.artifacts import ArtifactManager
 from mc_manager.services.backups import BackupService
 from mc_manager.services.ports import PortService
+from mc_manager.services.server_properties import (
+    PAPER_PERMISSION_PROPERTIES,
+    update_server_properties,
+)
 from mc_manager.services.storage import Storage
 
 logger = logging.getLogger(__name__)
@@ -170,13 +174,15 @@ class Worker:
             task.progress = 0.3
             session.commit()
 
-            moved: list[tuple[Any, Any]] = []
+            moved: list[tuple[Path, Path]] = []
             for source in (
                 self.storage.resolve(game.relative_path),
                 self.settings.backup_root / str(game_id),
             ):
                 if source.exists():
-                    trash = self.storage.staging_path(f"delete-game-{game_id}")
+                    trash = self.storage.temporary_sibling(
+                        source, f"delete-game-{game_id}"
+                    )
                     os.replace(source, trash)
                     moved.append((source, trash))
             try:
@@ -189,7 +195,7 @@ class Worker:
                     if trash.exists() and not source.exists():
                         os.replace(trash, source)
                 raise
-            for _source, trash in moved:
+            for _, trash in moved:
                 shutil.rmtree(trash, ignore_errors=True)
 
     def _process_start(self, task_id: str) -> None:
@@ -215,6 +221,10 @@ class Worker:
             session.commit()
             game_path = self.storage.resolve(game.relative_path)
             self.artifacts.accept_eula(game_path)
+            update_server_properties(
+                game_path / "server.properties",
+                PAPER_PERMISSION_PROPERTIES,
+            )
             source = game.map
             if self.settings.runtime_backend in {"docker", "podman"}:
                 if source.paper_url and source.paper_sha256:

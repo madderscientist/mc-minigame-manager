@@ -8,6 +8,7 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import CopyAddress from '../components/CopyAddress.vue'
 import CreateGameDialog from '../components/CreateGameDialog.vue'
 import EmptyState from '../components/EmptyState.vue'
+import QueryError from '../components/QueryError.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import type { Game } from '../api/types'
 import { useTaskStore } from '../stores/tasks'
@@ -26,6 +27,7 @@ const startTarget = ref<Game | null>(null)
 const stopTarget = ref<Game | null>(null)
 const actionBusy = ref(false)
 const manualPort = ref('')
+const queryError = computed(() => gamesQuery.error.value ?? mapsQuery.error.value)
 
 const games = computed(() => gamesQuery.data.value ?? [])
 const filtered = computed(() => games.value.filter((game) => {
@@ -46,7 +48,7 @@ function canStop(game: Game) {
 }
 
 async function start() {
-  if (!startTarget.value) return
+  if (!startTarget.value || actionBusy.value) return
   actionBusy.value = true
   try {
     const port = manualPort.value ? Number(manualPort.value) : undefined
@@ -62,7 +64,7 @@ async function start() {
 }
 
 async function stop() {
-  if (!stopTarget.value) return
+  if (!stopTarget.value || actionBusy.value) return
   actionBusy.value = true
   try {
     const accepted = await api.stop(stopTarget.value.game_id)
@@ -74,13 +76,17 @@ async function stop() {
     toasts.push('停止失败', reason instanceof ApiError ? reason.message : '', 'danger')
   } finally { actionBusy.value = false }
 }
+async function retryQueries() {
+  await Promise.all([gamesQuery.refetch(), mapsQuery.refetch()])
+}
+function closeStart() { if (!actionBusy.value) startTarget.value = null }
 </script>
 
 <template>
   <div class="page">
     <header class="page-header">
       <div><div class="eyebrow">Persistent games</div><h1>游戏</h1><p>管理可反复启动和停止的持久游戏副本。</p></div>
-      <button class="button primary" :disabled="!mapsQuery.data.value?.length" @click="createOpen = true">＋ 创建游戏</button>
+      <button class="button primary" :disabled="Boolean(queryError)||!mapsQuery.data.value?.length" @click="createOpen = true">＋ 创建游戏</button>
     </header>
     <div class="toolbar">
       <div class="segmented">
@@ -88,7 +94,8 @@ async function stop() {
       </div>
       <span class="result-count">{{ filtered.length }} 个游戏</span>
     </div>
-    <section class="panel table-panel">
+    <QueryError v-if="queryError" :error="queryError" @retry="retryQueries" />
+    <section v-else class="panel table-panel">
       <div v-if="filtered.length" class="data-table game-table">
         <div class="table-row table-head"><span>游戏</span><span>状态</span><span>连接地址</span><span>最后游玩</span><span>备份</span><span>操作</span></div>
         <div v-for="game in filtered" :key="game.game_id" class="table-row">
@@ -107,6 +114,6 @@ async function stop() {
     </section>
     <CreateGameDialog :open="createOpen" :maps="mapsQuery.data.value ?? []" @close="createOpen=false" @created="(id)=>{createOpen=false;router.push(`/games/${id}`)}" />
     <ConfirmDialog :open="Boolean(stopTarget)" title="停止游戏" :description="stopTarget?.runtime_state === 'unknown' ? '运行状态未知。系统将尝试终止对应容器，并根据实际退出结果创建备份。' : 'Paper 将优雅停止，随后自动创建备份并释放端口。'" confirm-label="停止并备份" :busy="actionBusy" danger @close="stopTarget=null" @confirm="stop" />
-    <Teleport to="body"><div v-if="startTarget" class="dialog-backdrop" @click.self="startTarget=null"><section class="dialog-card"><div class="dialog-icon">▶</div><h2>启动 {{ startTarget.name }}</h2><p>默认从全局端口池自动分配。Paper 完成启动后才可供玩家连接。</p><label class="field"><span>指定端口 <small>可选</small></span><input v-model="manualPort" type="number" min="1024" max="65535" placeholder="自动分配" /></label><div class="dialog-actions"><button class="button ghost" @click="startTarget=null">取消</button><button class="button primary" :disabled="actionBusy" @click="start">{{ actionBusy?'提交中…':'启动游戏' }}</button></div></section></div></Teleport>
+    <Teleport to="body"><div v-if="startTarget" class="dialog-backdrop" @click.self="closeStart"><section class="dialog-card"><div class="dialog-icon">▶</div><h2>启动 {{ startTarget.name }}</h2><p>默认从全局端口池自动分配。Paper 完成启动后才可供玩家连接。</p><label class="field"><span>指定端口 <small>可选</small></span><input v-model="manualPort" type="number" min="1024" max="65535" placeholder="自动分配" /></label><div class="dialog-actions"><button class="button ghost" :disabled="actionBusy" @click="closeStart">取消</button><button class="button primary" :disabled="actionBusy" @click="start">{{ actionBusy?'提交中…':'启动游戏' }}</button></div></section></div></Teleport>
   </div>
 </template>

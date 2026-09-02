@@ -12,11 +12,20 @@ from mc_manager.services.archive import SafeZipExtractor
 from tests.conftest import make_map_zip, make_resource_pack_zip
 
 
-@pytest.mark.parametrize("name", ["../escape.txt", "/absolute.txt", "C:/windows.txt"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "../escape.txt",
+        "/absolute.txt",
+        "C:/windows.txt",
+        "world\nresource-pack=https:/attacker.invalid/level.dat",
+        "world\u0085resource-pack=https:/attacker.invalid/level.dat",
+    ],
+)
 def test_rejects_unsafe_paths(tmp_path: Path, settings: Settings, name: str) -> None:
     archive = tmp_path / "bad.zip"
     archive.write_bytes(make_map_zip({name: b"bad", "level.dat": b"level"}))
-    with pytest.raises(ValidationError, match=r"非法路径|绝对路径"):
+    with pytest.raises(ValidationError, match=r"非法路径|绝对路径|控制字符"):
         SafeZipExtractor(settings).extract(archive, tmp_path / "out")
     assert not (tmp_path / "escape.txt").exists()
 

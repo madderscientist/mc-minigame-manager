@@ -4,7 +4,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -13,11 +13,16 @@ from mc_manager.enums import ResourceState
 from mc_manager.errors import ValidationError
 from mc_manager.models import MapRecord
 from mc_manager.services.archive import SafeZipExtractor
+from mc_manager.services.server_properties import (
+    PAPER_PERMISSION_PROPERTIES,
+    update_server_properties,
+)
 from mc_manager.services.storage import Storage
 from mc_manager.services.versions import read_data_version, required_java_major
 
 SAFE_RESOURCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 RESOURCE_PACK_STORAGE_NAME = "resource-pack.zip"
+RESOURCE_PACK_METADATA_NAME = "metadata.json"
 RESOURCE_PACK_PROPERTIES = {
     "resource-pack",
     "resource-pack-sha1",
@@ -187,7 +192,10 @@ class MapService:
                 child.rename(world / child.name)
             level_name = "world"
         else:
-            level_files = sorted(staging.rglob("level.dat"), key=lambda path: len(path.parts))
+            level_files = sorted(
+                staging.rglob("level.dat"),
+                key=lambda path: (len(path.parts), path.as_posix()),
+            )
             if not level_files:
                 raise ValidationError("invalid_map", "地图中未找到可启动世界")
             relative_parent = level_files[0].parent.relative_to(staging)
@@ -197,21 +205,14 @@ class MapService:
                 )
             level_name = relative_parent.as_posix()
 
-        properties_path = staging / "server.properties"
-        properties: dict[str, str] = {}
-        if properties_path.exists():
-            for line in properties_path.read_text(encoding="utf-8", errors="replace").splitlines():
-                if line and not line.lstrip().startswith("#") and "=" in line:
-                    key, value = line.split("=", 1)
-                    properties[key.strip()] = value.strip()
-        for key in RESOURCE_PACK_PROPERTIES:
-            properties.pop(key, None)
-        properties["level-name"] = level_name
-        properties["server-port"] = "25565"
-        properties_path.write_text(
-            "# Managed by mc-minigame-manager\n"
-            + "".join(f"{key}={value}\n" for key, value in sorted(properties.items())),
-            encoding="utf-8",
+        update_server_properties(
+            staging / "server.properties",
+            {
+                **PAPER_PERMISSION_PROPERTIES,
+                "level-name": level_name,
+                "server-port": "25565",
+            },
+            remove=RESOURCE_PACK_PROPERTIES,
         )
 
     def _install_resource_pack(
@@ -227,28 +228,117 @@ class MapService:
         resource_directory.mkdir(mode=0o750, exist_ok=True)
         target = resource_directory / RESOURCE_PACK_STORAGE_NAME
         shutil.copy2(resource_pack.path, target)
-        properties_path = staging / "server.properties"
-        properties: dict[str, str] = {}
-        for line in properties_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if line and not line.lstrip().startswith("#") and "=" in line:
-                key, value = line.split("=", 1)
-                properties[key.strip()] = value.strip()
-        properties["resource-pack"] = str(metadata["url"])
-        properties["resource-pack-sha1"] = resource_pack.sha1
-        properties["require-resource-pack"] = str(resource_pack.required).lower()
+        updates = {
+            "resource-pack": str(metadata["url"]),
+            "resource-pack-sha1": resource_pack.sha1,
+            "require-resource-pack": str(resource_pack.required).lower(),
+        }
         if resource_pack.prompt:
-            properties["resource-pack-prompt"] = (
+            updates["resource-pack-prompt"] = (
                 json.dumps(
                     {"text": resource_pack.prompt},
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ).replace("\\", "\\\\")
             )
-        properties_path.write_text(
-            "# Managed by mc-minigame-manager\n"
-            + "".join(f"{key}={value}\n" for key, value in sorted(properties.items())),
+        update_server_properties(staging / "server.properties", updates)
+        (resource_directory / RESOURCE_PACK_METADATA_NAME).write_text(
+            json.dumps(metadata, ensure_ascii=False, sort_keys=True),
             encoding="utf-8",
         )
+        return metadata
+
+    def recover_resource_pack_metadata(
+        self, map_id: int, map_directory: Path
+    ) -> dict[str, object] | None:
+        resource_directory = map_directory / ".mc-manager-resources"
+        resource_pack = resource_directory / RESOURCE_PACK_STORAGE_NAME
+        metadata_path = resource_directory / RESOURCE_PACK_METADATA_NAME
+        if not resource_pack.exists() and not metadata_path.exists():
+            return None
+        if not resource_pack.is_file() or not metadata_path.is_file():
+            raise ValidationError(
+                "resource_pack_metadata_missing", "已发布地图的资源包元数据不完整"
+            )
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValidationError(
+                "resource_pack_metadata_invalid", "已发布地图的资源包元数据损坏"
+            ) from error
+        if not isinstance(payload, dict):
+            raise ValidationError(
+                "resource_pack_metadata_invalid", "已发布地图的资源包元数据格式无效"
+            )
+        filename = payload.get("filename")
+        required = payload.get("required")
+        prompt = payload.get("prompt")
+        url = payload.get("url")
+        parsed_url = urlparse(url) if isinstance(url, str) else None
+        if (
+            not isinstance(filename, str)
+            or not SAFE_RESOURCE_NAME.fullmatch(filename)
+            or not isinstance(required, bool)
+            or (prompt is not None and not isinstance(prompt, str))
+            or not isinstance(url, str)
+            or parsed_url is None
+            or parsed_url.scheme not in {"http", "https"}
+        ):
+            raise ValidationError(
+                "resource_pack_metadata_invalid", "已发布地图的资源包元数据字段无效"
+            )
+        recovered = self._resource_pack_import(resource_pack)
+        expected_url_suffix = (
+            f"/resource-packs/maps/{map_id}/{recovered.sha1}/{quote(filename)}"
+        )
+        if not parsed_url.path.endswith(expected_url_suffix):
+            raise ValidationError(
+                "resource_pack_metadata_mismatch",
+                "已发布地图的资源包下载地址与文件摘要不一致",
+            )
+        metadata: dict[str, object] = {
+            "filename": filename,
+            "sha1": recovered.sha1,
+            "sha256": recovered.sha256,
+            "size_bytes": recovered.size_bytes,
+            "pack_format": self.extractor.validate_resource_pack(resource_pack),
+            "required": required,
+            "prompt": prompt,
+            "url": url,
+        }
+        for key in ("sha1", "sha256", "size_bytes", "pack_format"):
+            if payload.get(key) != metadata[key]:
+                raise ValidationError(
+                    "resource_pack_metadata_mismatch",
+                    "已发布地图的资源包与恢复元数据不一致",
+                )
+        properties: dict[str, str] = {}
+        properties_path = map_directory / "server.properties"
+        for line in properties_path.read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines():
+            if line and not line.lstrip().startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                properties[key.strip()] = value.strip()
+        expected_prompt = (
+            json.dumps(
+                {"text": prompt},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).replace("\\", "\\\\")
+            if prompt
+            else None
+        )
+        if (
+            properties.get("resource-pack") != url
+            or properties.get("resource-pack-sha1") != recovered.sha1
+            or properties.get("require-resource-pack") != str(required).lower()
+            or properties.get("resource-pack-prompt") != expected_prompt
+        ):
+            raise ValidationError(
+                "resource_pack_properties_mismatch",
+                "已发布地图的资源包配置与恢复元数据不一致",
+            )
         return metadata
 
     @staticmethod

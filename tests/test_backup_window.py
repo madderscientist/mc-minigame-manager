@@ -55,3 +55,15 @@ def test_backup_window_removes_oldest_only_after_new_backup(settings: Settings) 
         )
         assert len(records) == settings.backup_limit
         assert all(storage.resolve(record.relative_path).is_dir() for record in records)
+
+        legacy_backup = records[-1]
+        backup_path = storage.resolve(legacy_backup.relative_path)
+        legacy_backup.sha256 = storage.legacy_tree_digest(backup_path)[0]
+        legacy_sha256 = legacy_backup.sha256
+        session.commit()
+        progress.write_bytes(b"changed")
+
+        service.restore(session, game, legacy_backup.backup_id)
+
+        assert legacy_backup.sha256 == storage.tree_digest(backup_path)[0]
+        assert legacy_backup.sha256 != legacy_sha256

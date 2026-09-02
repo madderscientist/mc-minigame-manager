@@ -55,26 +55,37 @@ describe('API client', () => {
     })
   })
 
+  it('preserves a zero Retry-After value', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      response(
+        { error: { code: 'rate_limited', message: '稍后重试', details: {} } },
+        429,
+        { 'Retry-After': '0' },
+      ),
+    )
+
+    await expect(api.maps()).rejects.toMatchObject({ retryAfter: 0 })
+  })
+
   it('explains an HTML 413 response from the HTTPS proxy', async () => {
-    class PayloadTooLargeXmlHttpRequest {
-      upload = { onprogress: null as ((event: ProgressEvent) => void) | null }
-      status = 413
-      responseText = '<html><title>413 Request Entity Too Large</title></html>'
-      onload: (() => void) | null = null
-      onerror: (() => void) | null = null
-      open() {}
-      setRequestHeader() {}
-      send() { this.onload?.() }
-    }
-    vi.stubGlobal('XMLHttpRequest', PayloadTooLargeXmlHttpRequest)
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(response({
+        upload_id: 'd791ecac-ba64-4dbf-9fe3-5bfa4bbc2011',
+        chunk_size: 8,
+        completed: false,
+      }, 201))
+      .mockResolvedValueOnce(new Response(
+        '<html><title>413 Request Entity Too Large</title></html>',
+        { status: 413, headers: { 'Content-Type': 'text/html' } },
+      ))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
 
     await expect(api.uploadMap({
       mapFile: new File(['map'], 'map.zip'),
       name: 'Map',
-      mcVersion: '1.20.4',
     }, vi.fn())).rejects.toMatchObject({
       status: 413,
-      message: expect.stringContaining('HTTPS 代理拒绝了大文件上传'),
+      message: expect.stringContaining('HTTPS 代理拒绝了上传分片'),
     })
   })
 
@@ -130,59 +141,128 @@ describe('API client', () => {
   })
 
   it('reuses the upload idempotency key after an unknown network result', async () => {
-    class FakeXmlHttpRequest {
-      static instances: FakeXmlHttpRequest[] = []
-      upload: { onprogress: ((event: ProgressEvent) => void) | null } = { onprogress: null }
-      headers: Record<string, string> = {}
-      status = 0
-      responseText = ''
-      body: Document | XMLHttpRequestBodyInit | null = null
-      onload: (() => void) | null = null
-      onerror: (() => void) | null = null
-
-      constructor() { FakeXmlHttpRequest.instances.push(this) }
-      open() {}
-      setRequestHeader(name: string, value: string) { this.headers[name] = value }
-      send(body: Document | XMLHttpRequestBodyInit | null = null) {
-        this.body = body
-        if (FakeXmlHttpRequest.instances.length === 1) {
-          this.onerror?.()
-          return
-        }
-        if (FakeXmlHttpRequest.instances.length === 2) {
-          this.status = 502
-          this.responseText = JSON.stringify({ error: { code: 'http_502', message: '网关错误', details: {} } })
-          this.onload?.()
-          return
-        }
-        this.status = 201
-        this.responseText = JSON.stringify({ map_id: 9, name: 'Map', mc_version: '1.20.4' })
-        this.onload?.()
-      }
-    }
-    vi.stubGlobal('XMLHttpRequest', FakeXmlHttpRequest)
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(response({
+        upload_id: 'd791ecac-ba64-4dbf-9fe3-5bfa4bbc2011',
+        chunk_size: 8,
+        completed: false,
+      }, 201))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockRejectedValueOnce(new TypeError('network failed'))
+      .mockResolvedValueOnce(response({
+        upload_id: 'd791ecac-ba64-4dbf-9fe3-5bfa4bbc2011',
+        chunk_size: 8,
+        completed: true,
+      }, 201))
+      .mockResolvedValueOnce(response({ map_id: 9, name: 'Map', mc_version: '1.20.4' }))
     const input = {
       mapFile: new File(['map'], 'map.zip', { lastModified: 1 }),
       resourcePack: new File(['pack'], 'visuals.zip', { lastModified: 2 }),
       resourcePackRequired: true,
       resourcePackPrompt: '请下载材质包',
-      name: 'Map', mcVersion: '1.20.4',
+      name: 'Map',
     }
 
     await expect(api.uploadMap(input, vi.fn())).rejects.toMatchObject({ code: 'network_error' })
-    await expect(api.uploadMap(input, vi.fn())).rejects.toMatchObject({ status: 502 })
     await expect(api.uploadMap(input, vi.fn())).resolves.toMatchObject({ map_id: 9 })
-    expect(FakeXmlHttpRequest.instances[1]?.headers['Idempotency-Key']).toBe(
-      FakeXmlHttpRequest.instances[0]?.headers['Idempotency-Key'],
+    expect(String(fetchMock.mock.calls[4]?.[0])).toBe(String(fetchMock.mock.calls[0]?.[0]))
+    const firstCompleteHeaders = new Headers(fetchMock.mock.calls[3]?.[1]?.headers)
+    const secondCompleteHeaders = new Headers(fetchMock.mock.calls[5]?.[1]?.headers)
+    expect(secondCompleteHeaders.get('Idempotency-Key')).toBe(
+      firstCompleteHeaders.get('Idempotency-Key'),
     )
-    expect(FakeXmlHttpRequest.instances[2]?.headers['Idempotency-Key']).toBe(
-      FakeXmlHttpRequest.instances[0]?.headers['Idempotency-Key'],
-    )
-    const form = FakeXmlHttpRequest.instances[2]?.body as FormData
-    expect((form.get('resource_pack') as File).name).toBe('visuals.zip')
-    expect(form.has('java_major')).toBe(false)
-    expect(form.has('paper_build')).toBe(false)
-    expect(form.get('resource_pack_required')).toBe('true')
-    expect(form.get('resource_pack_prompt')).toBe('请下载材质包')
+    const metadata = JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body))
+    expect(metadata.resource_pack_filename).toBe('visuals.zip')
+    expect(metadata.resource_pack_required).toBe(true)
+    expect(metadata.resource_pack_prompt).toBe('请下载材质包')
+  })
+
+  it('does not reuse an upload session for different file content', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(response({ upload_id: 'first', chunk_size: 8, completed: false }, 201))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockRejectedValueOnce(new TypeError('network failed'))
+      .mockResolvedValueOnce(response({ upload_id: 'second', chunk_size: 8, completed: false }, 201))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(response({ map_id: 10, name: 'Map', mc_version: '1.20.4' }))
+    const first = {
+      mapFile: new File(['a'], 'map.zip', { lastModified: 1 }),
+      name: 'Map',
+    }
+    const changed = {
+      mapFile: new File(['b'], 'map.zip', { lastModified: 1 }),
+      name: 'Map',
+    }
+
+    await expect(api.uploadMap(first, vi.fn())).rejects.toMatchObject({ code: 'network_error' })
+    await expect(api.uploadMap(changed, vi.fn())).resolves.toMatchObject({ map_id: 10 })
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).not.toBe(String(fetchMock.mock.calls[3]?.[0]))
+    const firstHeaders = new Headers(fetchMock.mock.calls[2]?.[1]?.headers)
+    const changedHeaders = new Headers(fetchMock.mock.calls[5]?.[1]?.headers)
+    expect(firstHeaders.get('Idempotency-Key')).not.toBe(changedHeaders.get('Idempotency-Key'))
+  })
+
+  it('uploads at most four chunks concurrently', async () => {
+    let active = 0
+    let maximum = 0
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (path, init) => {
+      if (init?.method === 'POST' && !String(path).endsWith('/complete')) {
+        return response({ upload_id: 'id', chunk_size: 1, completed: false }, 201)
+      }
+      if (init?.method === 'PUT') {
+        active += 1
+        maximum = Math.max(maximum, active)
+        await new Promise((resolve) => window.setTimeout(resolve, 0))
+        active -= 1
+        return new Response(null, { status: 204 })
+      }
+      return response({ map_id: 9, name: 'Map', mc_version: '1.20.4' })
+    })
+
+    await api.uploadMap({
+      mapFile: new File(['abcdefgh'], 'map.zip', { lastModified: 1 }),
+      name: 'Map',
+    }, vi.fn())
+
+    expect(maximum).toBe(4)
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT')).toHaveLength(8)
+  })
+
+  it('aborts and settles remaining workers after a permanent chunk failure', async () => {
+    let putCount = 0
+    let abortedWorkers = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_path, init) => {
+      if (init?.method === 'POST') {
+        return response({ upload_id: 'id', chunk_size: 1, completed: false }, 201)
+      }
+      if (init?.method === 'DELETE') return new Response(null, { status: 204 })
+      putCount += 1
+      if (putCount === 1) {
+        return response({
+          error: { code: 'chunk_checksum_mismatch', message: '校验失败', details: {} },
+        }, 422)
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        if (init?.signal?.aborted) {
+          abortedWorkers += 1
+          reject(new DOMException('aborted', 'AbortError'))
+          return
+        }
+        init?.signal?.addEventListener('abort', () => {
+          abortedWorkers += 1
+          reject(new DOMException('aborted', 'AbortError'))
+        }, { once: true })
+      })
+    })
+
+    await expect(api.uploadMap({
+      mapFile: new File(['abcdefgh'], 'map.zip', { lastModified: 1 }),
+      name: 'Map',
+    }, vi.fn())).rejects.toMatchObject({ code: 'chunk_checksum_mismatch' })
+
+    expect(putCount).toBeLessThanOrEqual(4)
+    expect(abortedWorkers).toBe(putCount - 1)
   })
 })

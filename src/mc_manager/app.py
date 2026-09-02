@@ -1,3 +1,4 @@
+import asyncio
 import fcntl
 import hashlib
 import json
@@ -7,7 +8,7 @@ import secrets
 import shutil
 import uuid
 from collections.abc import Generator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, BinaryIO
@@ -65,7 +66,12 @@ from mc_manager.services.maps import (
 )
 from mc_manager.services.storage import Storage
 from mc_manager.services.tasks import LIVE_STATES, TaskService
-from mc_manager.services.versions import read_data_version, required_java_major
+from mc_manager.services.uploads import ChunkedUploadStore
+from mc_manager.services.versions import (
+    read_data_version,
+    read_minecraft_version_from_zip,
+    required_java_major,
+)
 
 logger = logging.getLogger(__name__)
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
@@ -76,6 +82,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     database = Database(resolved_settings)
     storage = Storage(resolved_settings.storage_root, resolved_settings.api_staging_root)
     tasks = TaskService(resolved_settings)
+    chunked_uploads = ChunkedUploadStore(
+        resolved_settings.upload_root,
+        max_bytes=resolved_settings.max_upload_bytes,
+        max_resource_pack_bytes=resolved_settings.max_resource_pack_bytes,
+        max_sessions=resolved_settings.max_upload_sessions,
+        max_reserved_bytes=resolved_settings.max_upload_reserved_bytes,
+    )
     maps = MapService(
         storage,
         SafeZipExtractor(resolved_settings),
@@ -91,7 +104,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ):
             path.mkdir(parents=True, exist_ok=True)
         database.initialize()
-        yield
+        await to_thread.run_sync(chunked_uploads.cleanup_expired)
+
+        async def upload_gc_loop() -> None:
+            while True:
+                await asyncio.sleep(3600)
+                try:
+                    await to_thread.run_sync(chunked_uploads.cleanup_expired)
+                except Exception:
+                    logger.exception("Unable to clean expired upload sessions")
+
+        upload_gc_task = asyncio.create_task(upload_gc_loop())
+        try:
+            yield
+        finally:
+            upload_gc_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await upload_gc_task
 
     app = FastAPI(
         title="Minecraft Minigame Manager",
@@ -105,6 +134,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = resolved_settings
     app.state.database = database
+    app.state.chunked_uploads = chunked_uploads
 
     @app.middleware("http")
     async def authenticate_api(request: Request, call_next: Any) -> Any:
@@ -211,6 +241,235 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
 
+    async def import_saved_map(
+        map_path: Path,
+        resource_pack_path: Path | None,
+        fields: dict[str, str],
+        idempotency_key: str | None,
+    ) -> MapRecord:
+        map_digest, _ = await to_thread.run_sync(_file_digests, map_path)
+        detected_version = await to_thread.run_sync(
+            read_minecraft_version_from_zip, map_path
+        )
+        submitted_version = fields.get("mc_version", "").strip()
+        if detected_version and submitted_version and detected_version != submitted_version:
+            raise ValidationError(
+                "mc_version_mismatch",
+                f"level.dat 显示版本为 {detected_version}, 与填写的 {submitted_version} 不一致",
+            )
+        fields["mc_version"] = detected_version or submitted_version
+        if not fields["mc_version"]:
+            raise ValidationError(
+                "mc_version_required",
+                "无法从 level.dat 读取 Minecraft 版本",
+            )
+
+        resource_pack_import: ResourcePackImport | None = None
+        resource_pack_digest: tuple[str, str] | None = None
+        if resource_pack_path is not None:
+            if resolved_settings.resource_pack_base_url is None:
+                raise ValidationError(
+                    "resource_pack_base_url_missing",
+                    "后端未配置资源包公网地址, 暂时不能上传客户端资源包",
+                )
+            if resource_pack_path.stat().st_size > resolved_settings.max_resource_pack_bytes:
+                raise ValidationError("resource_pack_too_large", "客户端资源包不能超过 250 MiB")
+            submitted_filename = fields.get("resource_pack_filename", "")
+            filename = Path(submitted_filename.replace("\\", "/")).name
+            if not SAFE_RESOURCE_NAME.fullmatch(filename):
+                filename = "resources.zip"
+            sha256, sha1 = await to_thread.run_sync(_file_digests, resource_pack_path)
+            resource_pack_digest = (filename, sha256)
+            prompt = fields.get("resource_pack_prompt", "").strip() or None
+            if prompt is not None and len(prompt) > 256:
+                raise ValidationError(
+                    "resource_pack_prompt_too_long", "资源包提示不能超过 256 个字符"
+                )
+            resource_pack_import = ResourcePackImport(
+                path=resource_pack_path,
+                filename=filename,
+                sha1=sha1,
+                sha256=sha256,
+                size_bytes=resource_pack_path.stat().st_size,
+                required=_parse_form_bool(fields.get("resource_pack_required"), False),
+                prompt=prompt,
+            )
+
+        try:
+            java_major = required_java_major(fields["mc_version"])
+        except ValueError as error:
+            raise ValidationError("mc_version_unsupported", str(error)) from error
+        requested_paper_build = fields.get("paper_build", "").strip()
+        hash_fields = dict(fields)
+        if requested_paper_build:
+            fields["paper_build"] = requested_paper_build
+        elif fields.get("paper_url", "").strip():
+            fields["paper_build"] = "custom"
+            hash_fields["paper_build"] = "custom"
+        else:
+            with database.session_factory() as session:
+                reusable_build = maps.latest_reusable_paper_build(
+                    session, fields["mc_version"]
+                )
+            if reusable_build is None:
+                reusable_build = await to_thread.run_sync(
+                    partial(
+                        latest_stable_paper_build,
+                        fields["mc_version"],
+                        user_agent=resolved_settings.papermc_user_agent,
+                    )
+                )
+            fields["paper_build"] = reusable_build
+            hash_fields["paper_build"] = "automatic-compatible"
+        import_hash = _map_import_hash(
+            map_digest=map_digest,
+            resource_pack_digest=resource_pack_digest,
+            resource_pack_required=(
+                resource_pack_import.required if resource_pack_import else False
+            ),
+            resource_pack_prompt=(
+                resource_pack_import.prompt if resource_pack_import else None
+            ),
+            fields=hash_fields,
+            java_major=java_major,
+        )
+        return await to_thread.run_sync(
+            _import_map,
+            database,
+            maps,
+            map_path,
+            fields.get("name", ""),
+            fields["mc_version"],
+            fields["paper_build"],
+            java_major,
+            fields.get("paper_url") or None,
+            fields.get("paper_sha256") or None,
+            idempotency_key,
+            import_hash,
+            resource_pack_import,
+        )
+
+    @app.post("/api/uploads/{upload_id}", status_code=201)
+    async def create_chunked_upload(
+        upload_id: str,
+        request: Request,
+    ) -> dict[str, bool | int | str]:
+        raw_metadata = bytearray()
+        async for part in request.stream():
+            raw_metadata.extend(part)
+            if len(raw_metadata) > 64 * 1024:
+                raise ValidationError(
+                    "upload_metadata_too_large", "上传元数据不能超过 64 KiB"
+                )
+        try:
+            payload: Any = json.loads(raw_metadata)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValidationError(
+                "upload_metadata_invalid", "上传元数据不是有效 JSON"
+            ) from error
+        if not isinstance(payload, dict) or not all(
+            isinstance(key, str) for key in payload
+        ):
+            raise ValidationError("upload_metadata_invalid", "上传元数据格式无效")
+        metadata: dict[str, object] = dict(payload)
+        chunk_size, completed = await to_thread.run_sync(
+            chunked_uploads.create, upload_id, metadata
+        )
+        return {
+            "upload_id": chunked_uploads.normalize_id(upload_id),
+            "chunk_size": chunk_size,
+            "completed": completed,
+        }
+
+    @app.put("/api/uploads/{upload_id}/{kind}/{index}", status_code=204)
+    async def upload_chunk(
+        upload_id: str,
+        kind: str,
+        index: int,
+        request: Request,
+        chunk_sha256: Annotated[str, Header(alias="X-Chunk-SHA256")],
+    ) -> Response:
+        expected_size = await to_thread.run_sync(
+            chunked_uploads.expected_chunk_size, upload_id, kind, index
+        )
+        content_length = request.headers.get("Content-Length")
+        if content_length is not None:
+            try:
+                declared_size = int(content_length)
+            except ValueError as error:
+                raise ValidationError(
+                    "chunk_size_invalid", "Content-Length 格式无效"
+                ) from error
+            if declared_size != expected_size:
+                raise ValidationError(
+                    "chunk_size_invalid",
+                    f"分片 {index} 大小应为 {expected_size} 字节",
+                )
+        data = bytearray()
+        async for part in request.stream():
+            data.extend(part)
+            if len(data) > expected_size:
+                raise ValidationError(
+                    "chunk_size_invalid",
+                    f"分片 {index} 大小应为 {expected_size} 字节",
+                )
+        await to_thread.run_sync(
+            chunked_uploads.write_chunk,
+            upload_id,
+            kind,
+            index,
+            bytes(data),
+            chunk_sha256,
+        )
+        return Response(status_code=204)
+
+    @app.post("/api/uploads/{upload_id}/complete", response_model=UploadResult)
+    async def complete_chunked_upload(upload_id: str) -> UploadResult:
+        normalized_upload_id = chunked_uploads.normalize_id(upload_id)
+        with chunked_uploads.completion(upload_id) as completion:
+            if completion.result is not None:
+                return UploadResult.model_validate(completion.result)
+            completed = completion.upload
+            if completed is None:
+                raise RuntimeError("upload completion has no source or result")
+            fields = {
+                key: str(value)
+                for key, value in completed.metadata.items()
+                if key
+                in {
+                    "name",
+                    "mc_version",
+                    "paper_build",
+                    "paper_url",
+                    "paper_sha256",
+                    "resource_pack_filename",
+                    "resource_pack_required",
+                    "resource_pack_prompt",
+                }
+            }
+            record = await import_saved_map(
+                completed.map_path,
+                completed.resource_pack_path,
+                fields,
+                f"chunked-upload:{normalized_upload_id}",
+            )
+            result = UploadResult(
+                map_id=record.map_id,
+                name=record.name,
+                mc_version=record.mc_version,
+            )
+            await to_thread.run_sync(
+                chunked_uploads.finish,
+                upload_id,
+                result.model_dump(mode="json"),
+            )
+            return result
+
+    @app.delete("/api/uploads/{upload_id}", status_code=204)
+    async def cancel_chunked_upload(upload_id: str) -> Response:
+        await to_thread.run_sync(chunked_uploads.cancel, upload_id)
+        return Response(status_code=204)
+
     @app.post("/api/maps", response_model=UploadResult, status_code=201)
     async def upload_map(
         request: Request,
@@ -257,13 +516,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             upload_dir.mkdir(parents=True, mode=0o700)
             map_path = upload_dir / "map.zip"
-            map_digest, _ = await _save_upload(
+            await _save_upload(
                 map_upload, map_path, resolved_settings.max_upload_bytes
             )
             total = map_path.stat().st_size
 
-            resource_pack_import: ResourcePackImport | None = None
-            resource_pack_digest: tuple[str, str] | None = None
+            resource_pack_path: Path | None = None
             if resource_pack_upload is not None:
                 submitted_filename = resource_pack_upload.filename or ""
                 filename = Path(submitted_filename.replace("\\", "/")).name
@@ -273,81 +531,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 remaining = resolved_settings.max_upload_bytes - total
                 if remaining <= 0:
                     raise ValidationError("upload_too_large", "上传总大小超过限制")
-                sha256, sha1 = await _save_upload(
+                await _save_upload(
                     resource_pack_upload,
                     resource_pack_path,
                     min(remaining, resolved_settings.max_resource_pack_bytes),
                 )
-                total += resource_pack_path.stat().st_size
-                resource_pack_digest = (filename, sha256)
-                required = _parse_form_bool(fields.get("resource_pack_required"), False)
-                prompt = fields.get("resource_pack_prompt", "").strip() or None
-                if prompt is not None and len(prompt) > 256:
-                    raise ValidationError(
-                        "resource_pack_prompt_too_long", "资源包提示不能超过 256 个字符"
-                    )
-                resource_pack_import = ResourcePackImport(
-                    path=resource_pack_path,
-                    filename=filename,
-                    sha1=sha1,
-                    sha256=sha256,
-                    size_bytes=resource_pack_path.stat().st_size,
-                    required=required,
-                    prompt=prompt,
-                )
+                fields["resource_pack_filename"] = filename
 
-            try:
-                java_major = required_java_major(fields.get("mc_version", ""))
-            except ValueError as error:
-                raise ValidationError("mc_version_unsupported", str(error)) from error
-            requested_paper_build = fields.get("paper_build", "").strip()
-            hash_fields = dict(fields)
-            if requested_paper_build:
-                fields["paper_build"] = requested_paper_build
-            elif fields.get("paper_url", "").strip():
-                fields["paper_build"] = "custom"
-                hash_fields["paper_build"] = "custom"
-            else:
-                with database.session_factory() as session:
-                    reusable_build = maps.latest_reusable_paper_build(
-                        session, fields.get("mc_version", "")
-                    )
-                if reusable_build is None:
-                    reusable_build = await to_thread.run_sync(
-                        partial(
-                            latest_stable_paper_build,
-                            fields.get("mc_version", "").strip(),
-                            user_agent=resolved_settings.papermc_user_agent,
-                        )
-                    )
-                fields["paper_build"] = reusable_build
-                hash_fields["paper_build"] = "automatic-compatible"
-            import_hash = _map_import_hash(
-                map_digest=map_digest,
-                resource_pack_digest=resource_pack_digest,
-                resource_pack_required=(
-                    resource_pack_import.required if resource_pack_import else False
-                ),
-                resource_pack_prompt=(
-                    resource_pack_import.prompt if resource_pack_import else None
-                ),
-                fields=hash_fields,
-                java_major=java_major,
-            )
-            record = await to_thread.run_sync(
-                _import_map,
-                database,
-                maps,
-                map_path,
-                fields.get("name", ""),
-                fields.get("mc_version", ""),
-                fields.get("paper_build", ""),
-                java_major,
-                fields.get("paper_url") or None,
-                fields.get("paper_sha256") or None,
-                idempotency_key,
-                import_hash,
-                resource_pack_import,
+            record = await import_saved_map(
+                map_path, resource_pack_path, fields, idempotency_key
             )
             return UploadResult(
                 map_id=record.map_id,
@@ -367,7 +559,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if game_exists is not None:
             raise ConflictError("map_in_use", "存在由该地图创建的游戏, 不能删除")
         source = storage.resolve(record.relative_path)
-        trash = storage.staging_path(f"delete-map-{map_id}")
+        trash = storage.temporary_sibling(source, f"delete-map-{map_id}")
         moved = False
         if source.exists():
             os.replace(source, trash)
@@ -696,6 +888,20 @@ def _save_upload_file(
     return sha256.hexdigest(), sha1.hexdigest()
 
 
+def _file_digests(path: Path) -> tuple[str, str]:
+    with path.open("rb") as source:
+        return _hash_stream(source)
+
+
+def _hash_stream(source: BinaryIO) -> tuple[str, str]:
+    sha256 = hashlib.sha256()
+    sha1 = hashlib.sha1(usedforsecurity=False)
+    while chunk := source.read(1024 * 1024):
+        sha256.update(chunk)
+        sha1.update(chunk)
+    return sha256.hexdigest(), sha1.hexdigest()
+
+
 async def _save_upload(upload: UploadFile, destination: Path, limit: int) -> tuple[str, str]:
     try:
         return await to_thread.run_sync(
@@ -900,10 +1106,8 @@ def _existing_map_import(
         record.content_sha256, _ = maps.storage.tree_digest(destination)
         record.data_version = read_data_version(destination)
         record.extra_metadata = {
-            "resource_pack": (
-                maps.describe_resource_pack(record.map_id, resource_pack)
-                if resource_pack is not None
-                else None
+            "resource_pack": maps.recover_resource_pack_metadata(
+                record.map_id, destination
             ),
         }
         record.state = ResourceState.READY

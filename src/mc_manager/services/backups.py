@@ -126,7 +126,10 @@ class BackupService:
         expected_sha = backup.sha256
         actual_sha, _ = self.storage.tree_digest(source)
         if actual_sha != expected_sha:
-            raise ValidationError("backup_corrupt", "备份校验失败, 拒绝恢复")
+            legacy_sha, _ = self.storage.legacy_tree_digest(source)
+            if legacy_sha != expected_sha:
+                raise ValidationError("backup_corrupt", "备份校验失败, 拒绝恢复")
+            backup.sha256 = actual_sha
         self.storage.replace_tree_atomic(
             source, destination, prefix=f"restore-game-{game.game_id}-{backup.backup_id}"
         )

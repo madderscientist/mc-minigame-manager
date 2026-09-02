@@ -40,6 +40,8 @@ class Settings(BaseSettings):
 
     max_upload_bytes: int = Field(default=2 * 1024**3, ge=1)
     max_upload_overhead_bytes: int = Field(default=16 * 1024**2, ge=1024)
+    max_upload_sessions: int = Field(default=8, ge=1, le=1024)
+    max_upload_reserved_bytes: int = Field(default=8 * 1024**3, ge=1)
     resource_pack_base_url: str | None = None
     max_resource_pack_bytes: int = Field(
         default=250 * 1024**2, ge=1, le=250 * 1024**2
@@ -64,6 +66,10 @@ class Settings(BaseSettings):
     def validate_port_range(self) -> Self:
         if self.port_min > self.port_max:
             raise ValueError("MC_PORT_MIN must be less than or equal to MC_PORT_MAX")
+        if self.max_upload_reserved_bytes < self.max_upload_bytes:
+            raise ValueError(
+                "MC_MAX_UPLOAD_RESERVED_BYTES must be at least MC_MAX_UPLOAD_BYTES"
+            )
         if (self.public_game_host is None) != (self.public_game_port_min is None):
             raise ValueError(
                 "MC_PUBLIC_GAME_HOST and MC_PUBLIC_GAME_PORT_MIN must be configured together"

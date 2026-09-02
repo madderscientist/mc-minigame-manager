@@ -30,6 +30,10 @@ class Storage:
         return self.staging_root / f"{prefix}-{uuid.uuid4().hex}"
 
     @staticmethod
+    def temporary_sibling(path: Path, prefix: str) -> Path:
+        return path.parent / f".{prefix}-{uuid.uuid4().hex}.tmp"
+
+    @staticmethod
     def assert_safe_tree(source: Path) -> None:
         if not source.is_dir() or source.is_symlink():
             raise ValidationError("invalid_map_tree", "地图目录不存在或不是普通目录")
@@ -48,7 +52,7 @@ class Storage:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
             raise ValidationError("destination_exists", "目标地图目录已存在")
-        staging = destination.parent / f".{prefix}-{uuid.uuid4().hex}.tmp"
+        staging = self.temporary_sibling(destination, prefix)
         try:
             self._copy_tree_content(source, staging)
             self.assert_safe_tree(staging)
@@ -60,8 +64,8 @@ class Storage:
     def replace_tree_atomic(self, source: Path, destination: Path, *, prefix: str) -> None:
         self.assert_safe_tree(source)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        staging = destination.parent / f".{prefix}-new-{uuid.uuid4().hex}.tmp"
-        rollback = destination.parent / f".{prefix}-old-{uuid.uuid4().hex}.tmp"
+        staging = self.temporary_sibling(destination, f"{prefix}-new")
+        rollback = self.temporary_sibling(destination, f"{prefix}-old")
         try:
             self._copy_tree_content(source, staging)
             self.assert_safe_tree(staging)
@@ -94,6 +98,33 @@ class Storage:
 
     @staticmethod
     def tree_digest(path: Path) -> tuple[str, int]:
+        digest = hashlib.sha256()
+        size = 0
+        for item in sorted(path.rglob("*"), key=lambda entry: entry.relative_to(path).as_posix()):
+            if item.is_symlink():
+                raise ValidationError("symlink_not_allowed", "存储树中禁止符号链接")
+            relative = item.relative_to(path).as_posix().encode()
+            if item.is_dir():
+                digest.update(b"D")
+                digest.update(len(relative).to_bytes(4, "big"))
+                digest.update(relative)
+                continue
+            if not item.is_file():
+                raise ValidationError("special_file_not_allowed", "存储树中禁止特殊文件")
+            file_size = item.stat().st_size
+            digest.update(b"F")
+            digest.update(len(relative).to_bytes(4, "big"))
+            digest.update(relative)
+            digest.update(file_size.to_bytes(8, "big"))
+            with item.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    size += len(chunk)
+                    digest.update(chunk)
+        return digest.hexdigest(), size
+
+    @staticmethod
+    def legacy_tree_digest(path: Path) -> tuple[str, int]:
+        """Read pre-0.2 tree hashes so existing backups can be upgraded on restore."""
         digest = hashlib.sha256()
         size = 0
         for file_path in sorted(item for item in path.rglob("*") if item.is_file()):

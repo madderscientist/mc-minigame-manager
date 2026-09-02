@@ -15,7 +15,7 @@ defineProps<{ compact?: boolean }>()
       </div>
       <div>
         <b>02 · 版本信息</b>
-        <p>版本会优先从文件名或地图名称识别，也可手动修改；系统自动选择 Paper build 和 Java。</p>
+        <p>系统直接读取 <code>level.dat</code> 中的版本并自动选择 Paper build 和 Java；无法识别版本的地图会被拒绝。</p>
       </div>
       <div>
         <b>03 · 默认容量限制</b>

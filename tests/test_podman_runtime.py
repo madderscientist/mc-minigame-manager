@@ -2,10 +2,12 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from mc_manager.config import Settings
 from mc_manager.runtime import build_runtime
 from mc_manager.runtime.base import RuntimeSpec
-from mc_manager.runtime.podman_backend import PodmanRuntime
+from mc_manager.runtime.podman_backend import PodmanError, PodmanRuntime
 
 
 class RecordingPodman(PodmanRuntime):
@@ -86,3 +88,56 @@ def test_managed_run_ids_reads_labels(monkeypatch) -> None:
 
     monkeypatch.setattr(runtime, "_run", fake_run)
     assert runtime.managed_run_ids() == {"run-1"}
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "oom_killed", "expected"),
+    [(0, False, True), (143, False, True), (1, False, False), (0, True, False)],
+)
+def test_stop_checks_exit_state_after_term(
+    monkeypatch, exit_code: int, oom_killed: bool, expected: bool
+) -> None:
+    runtime = PodmanRuntime("podman")
+    inspections = iter(
+        [
+            {"State": {"Status": "running"}},
+            {
+                "State": {
+                    "Status": "exited",
+                    "ExitCode": exit_code,
+                    "OOMKilled": oom_killed,
+                }
+            },
+        ]
+    )
+    commands: list[list[str]] = []
+    monkeypatch.setattr(runtime, "_inspect", lambda _run_id: next(inspections))
+    monkeypatch.setattr(runtime, "_status", lambda _run_id: "exited")
+    monkeypatch.setattr(
+        runtime,
+        "_run",
+        lambda arguments, **_kwargs: commands.append(list(arguments))
+        or subprocess.CompletedProcess(arguments, 0, "", ""),
+    )
+
+    assert runtime.stop("run-id", timeout_seconds=1) is expected
+    assert ["rm", "mc-run-id"] in commands
+
+
+@pytest.mark.parametrize(("exists_code", "raises"), [(1, False), (0, True), (125, True)])
+def test_inspect_distinguishes_missing_container_from_podman_failure(
+    monkeypatch, exists_code: int, raises: bool
+) -> None:
+    runtime = PodmanRuntime("podman")
+
+    def fake_run(arguments, *, check=True, timeout=60):
+        del check, timeout
+        return_code = exists_code if arguments[:2] == ["container", "exists"] else 125
+        return subprocess.CompletedProcess(arguments, return_code, "", "temporary failure")
+
+    monkeypatch.setattr(runtime, "_run", fake_run)
+    if raises:
+        with pytest.raises(PodmanError, match="temporary failure"):
+            runtime._inspect("run-id")
+    else:
+        assert runtime._inspect("run-id") is None

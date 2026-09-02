@@ -1,7 +1,11 @@
+import gzip
 import hashlib
+import io
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import nbtlib
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import event
@@ -14,6 +18,22 @@ from mc_manager.models import MapRecord, RunRecord
 from mc_manager.runtime.fake import FakeRuntime
 from mc_manager.worker import Worker
 from tests.conftest import make_map_zip, make_resource_pack_zip
+
+
+def make_versioned_map_zip(version: str) -> bytes:
+    document = nbtlib.File(
+        {
+            "Data": nbtlib.Compound(
+                {
+                    "Version": nbtlib.Compound({"Name": nbtlib.String(version)}),
+                    "DataVersion": nbtlib.Int(3700),
+                }
+            )
+        }
+    )
+    output = io.BytesIO()
+    document.write(output)
+    return make_map_zip({"level.dat": gzip.compress(output.getvalue())})
 
 
 def run_task(client: TestClient, worker: Worker, task_id: str) -> dict:
@@ -180,6 +200,49 @@ def test_each_game_has_its_own_id_and_files(
     assert {game["map_id"] for game in games} == {map_id}
 
 
+def test_paper_permissions_are_enforced_on_import_and_start(
+    app_client: tuple[TestClient, Worker, FakeRuntime], upload_map
+) -> None:
+    client, worker, _runtime = app_client
+    archive = make_map_zip(
+        {
+            "world/level.dat": b"test-level",
+            "server.properties": (
+                b"enable-command-block=false\n"
+                b"function-permission-level=1\n"
+                b"op-permission-level=1\n"
+            ),
+        }
+    )
+    map_id = upload_map(client, archive)
+    map_properties = (
+        client.app.state.settings.map_root / str(map_id) / "server.properties"
+    ).read_text()
+    assert "enable-command-block=true" in map_properties
+    assert "function-permission-level=4" in map_properties
+    assert "op-permission-level=4" in map_properties
+
+    game_id = create_ready_game(client, worker, map_id)
+    properties_path = (
+        client.app.state.settings.game_root / str(game_id) / "server.properties"
+    )
+    properties_path.write_text(
+        properties_path.read_text()
+        .replace("enable-command-block=true", "enable-command-block=false")
+        .replace("function-permission-level=4", "function-permission-level=1")
+        .replace("op-permission-level=4", "op-permission-level=1")
+    )
+
+    start = client.post("/api/start", json={"game_id": game_id})
+    assert start.status_code == 202, start.text
+    task = run_task(client, worker, start.json()["task_id"])
+    assert task["status"] == "succeeded"
+    started_properties = properties_path.read_text()
+    assert "enable-command-block=true" in started_properties
+    assert "function-permission-level=4" in started_properties
+    assert "op-permission-level=4" in started_properties
+
+
 def test_game_list_avoids_per_game_run_queries(
     app_client: tuple[TestClient, Worker, FakeRuntime], map_zip: bytes, upload_map
 ) -> None:
@@ -318,6 +381,153 @@ def test_map_upload_automatically_locks_latest_stable_paper_build(
     details = client.get(f"/api/maps/{upload.json()['map_id']}").json()
     assert details["paper_build"] == "497"
     assert details["java_major"] == 21
+
+
+def test_map_upload_reads_minecraft_version_from_level_dat(
+    app_client: tuple[TestClient, Worker, FakeRuntime],
+) -> None:
+    client, _worker, _runtime = app_client
+    upload = client.post(
+        "/api/maps",
+        data={"name": "Detected", "paper_build": "497"},
+        files={
+            "map": (
+                "map.zip",
+                make_versioned_map_zip("1.20.4"),
+                "application/zip",
+            )
+        },
+    )
+
+    assert upload.status_code == 201, upload.text
+    assert upload.json()["mc_version"] == "1.20.4"
+
+
+def test_map_upload_rejects_version_that_disagrees_with_level_dat(
+    app_client: tuple[TestClient, Worker, FakeRuntime],
+) -> None:
+    client, _worker, _runtime = app_client
+    upload = client.post(
+        "/api/maps",
+        data={"name": "Mismatch", "mc_version": "1.21.4", "paper_build": "497"},
+        files={
+            "map": (
+                "map.zip",
+                make_versioned_map_zip("1.20.4"),
+                "application/zip",
+            )
+        },
+    )
+
+    assert upload.status_code == 422
+    assert upload.json()["error"]["code"] == "mc_version_mismatch"
+
+
+def test_map_upload_requires_manual_version_only_when_detection_fails(
+    app_client: tuple[TestClient, Worker, FakeRuntime], map_zip: bytes
+) -> None:
+    client, _worker, _runtime = app_client
+    upload = client.post(
+        "/api/maps",
+        data={"name": "Old map", "paper_build": "497"},
+        files={"map": ("map.zip", map_zip, "application/zip")},
+    )
+
+    assert upload.status_code == 422
+    assert upload.json()["error"]["code"] == "mc_version_required"
+
+
+def test_chunked_upload_is_verified_completed_and_retried(
+    app_client: tuple[TestClient, Worker, FakeRuntime],
+) -> None:
+    client, _worker, _runtime = app_client
+    archive = make_versioned_map_zip("1.20.4")
+    upload_id = "a850d3d9-c305-438a-b81d-43fcfafad85e"
+    metadata = {
+        "map_size": len(archive),
+        "resource_pack_size": 0,
+        "name": "Chunked map",
+        "paper_build": "497",
+    }
+    created = client.post(f"/api/uploads/{upload_id}", json=metadata)
+    assert created.status_code == 201, created.text
+    assert created.json()["completed"] is False
+    chunk_size = created.json()["chunk_size"]
+    for index, offset in enumerate(range(0, len(archive), chunk_size)):
+        chunk = archive[offset : offset + chunk_size]
+        uploaded = client.put(
+            f"/api/uploads/{upload_id}/map/{index}",
+            content=chunk,
+            headers={"X-Chunk-SHA256": hashlib.sha256(chunk).hexdigest()},
+        )
+        assert uploaded.status_code == 204, uploaded.text
+
+    first = client.post(
+        f"/api/uploads/{upload_id}/complete",
+        headers={"Idempotency-Key": "chunked-map-1"},
+    )
+    second = client.post(
+        f"/api/uploads/{upload_id}/complete",
+        headers={"Idempotency-Key": "different-key-is-ignored-after-completion"},
+    )
+    recreated = client.post(f"/api/uploads/{upload_id}", json=metadata)
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json()
+    assert first.json()["mc_version"] == "1.20.4"
+    assert recreated.json()["completed"] is True
+
+
+def test_chunked_complete_is_idempotent_if_result_write_crashes(
+    app_client: tuple[TestClient, Worker, FakeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _worker, _runtime = app_client
+    archive = make_versioned_map_zip("1.20.4")
+    upload_id = "ce273691-5695-4930-8711-d050e64f13d9"
+    created = client.post(
+        f"/api/uploads/{upload_id}",
+        json={"map_size": len(archive), "name": "Crash safe", "paper_build": "497"},
+    )
+    chunk_size = created.json()["chunk_size"]
+    for index, offset in enumerate(range(0, len(archive), chunk_size)):
+        chunk = archive[offset : offset + chunk_size]
+        response = client.put(
+            f"/api/uploads/{upload_id}/map/{index}",
+            content=chunk,
+            headers={"X-Chunk-SHA256": hashlib.sha256(chunk).hexdigest()},
+        )
+        assert response.status_code == 204
+
+    store = client.app.state.chunked_uploads
+    original_finish = store.finish
+
+    def crash_before_result(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated crash before result.json")
+
+    monkeypatch.setattr(store, "finish", crash_before_result)
+    with pytest.raises(OSError, match="simulated crash"):
+        client.post(f"/api/uploads/{upload_id}/complete")
+    monkeypatch.setattr(store, "finish", original_finish)
+
+    retried = client.post(f"/api/uploads/{upload_id}/complete")
+    assert retried.status_code == 200, retried.text
+    assert len(client.get("/api/maps").json()) == 1
+
+
+def test_chunked_upload_reports_missing_chunks(
+    app_client: tuple[TestClient, Worker, FakeRuntime],
+) -> None:
+    client, _worker, _runtime = app_client
+    upload_id = "a1fece6d-3409-43d9-83e9-e3a128e9ff62"
+    created = client.post(
+        f"/api/uploads/{upload_id}",
+        json={"map_size": 4, "name": "Incomplete", "mc_version": "1.20.4"},
+    )
+    assert created.status_code == 201
+    completed = client.post(f"/api/uploads/{upload_id}/complete")
+    assert completed.status_code == 409
+    assert completed.json()["error"]["code"] == "upload_incomplete"
+    assert completed.json()["error"]["details"] == {"missing": [0]}
 
 
 def test_map_upload_reuses_highest_existing_build_for_same_version(
@@ -548,6 +758,105 @@ def test_uploaded_resource_pack_overrides_bundled_resources_zip(
         details = client.get(f"/api/maps/{map_id}").json()
         assert details["resource_pack"]["filename"] == "visuals.zip"
         assert not (configured.map_root / str(map_id) / "world" / "resources.zip").exists()
+
+
+def test_interrupted_import_recovers_bundled_resource_pack_metadata(
+    settings: Settings,
+) -> None:
+    values = settings.model_dump()
+    values["resource_pack_base_url"] = "https://packs.example.com"
+    configured = Settings.model_validate(values)
+    archive = make_map_zip(
+        {"level.dat": b"test-level", "resources.zip": make_resource_pack_zip()}
+    )
+    headers = {"Idempotency-Key": "bundled-pack-crash"}
+    fields = {
+        "name": "Recovered bundled pack",
+        "mc_version": "1.20.4",
+        "paper_build": "497",
+    }
+    with TestClient(create_app(configured)) as client:
+        first = client.post(
+            "/api/maps",
+            data=fields,
+            files={"map": ("map.zip", archive, "application/zip")},
+            headers=headers,
+        )
+        assert first.status_code == 201, first.text
+        map_id = first.json()["map_id"]
+        expected = client.get(f"/api/maps/{map_id}").json()["resource_pack"]
+        with client.app.state.database.session_factory.begin() as session:
+            record = session.get(MapRecord, map_id)
+            assert record is not None
+            record.state = ResourceState.PREPARING
+            record.extra_metadata = {}
+
+    changed_values = configured.model_dump()
+    changed_values["resource_pack_base_url"] = "https://new-packs.example.com"
+    changed = Settings.model_validate(changed_values)
+    with TestClient(create_app(changed)) as client:
+        retried = client.post(
+            "/api/maps",
+            data=fields,
+            files={"map": ("map.zip", archive, "application/zip")},
+            headers=headers,
+        )
+        assert retried.status_code == 201, retried.text
+        recovered = client.get(f"/api/maps/{map_id}").json()["resource_pack"]
+        assert recovered == expected
+        assert recovered["url"].startswith("https://packs.example.com/")
+
+
+def test_interrupted_import_rejects_resource_pack_url_digest_mismatch(
+    settings: Settings,
+) -> None:
+    values = settings.model_dump()
+    values["resource_pack_base_url"] = "https://packs.example.com"
+    configured = Settings.model_validate(values)
+    archive = make_map_zip(
+        {"level.dat": b"test-level", "resources.zip": make_resource_pack_zip()}
+    )
+    fields = {
+        "name": "Tampered pack URL",
+        "mc_version": "1.20.4",
+        "paper_build": "497",
+    }
+    headers = {"Idempotency-Key": "tampered-pack-url"}
+    with TestClient(create_app(configured)) as client:
+        first = client.post(
+            "/api/maps",
+            data=fields,
+            files={"map": ("map.zip", archive, "application/zip")},
+            headers=headers,
+        )
+        map_id = first.json()["map_id"]
+        map_directory = configured.map_root / str(map_id)
+        metadata_path = map_directory / ".mc-manager-resources" / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        original_url = metadata["url"]
+        metadata["url"] = original_url.replace(metadata["sha1"], "0" * 40)
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        properties_path = map_directory / "server.properties"
+        properties_path.write_text(
+            properties_path.read_text(encoding="utf-8").replace(
+                original_url, metadata["url"]
+            ),
+            encoding="utf-8",
+        )
+        with client.app.state.database.session_factory.begin() as session:
+            record = session.get(MapRecord, map_id)
+            assert record is not None
+            record.state = ResourceState.PREPARING
+            record.extra_metadata = {}
+
+        retried = client.post(
+            "/api/maps",
+            data=fields,
+            files={"map": ("map.zip", archive, "application/zip")},
+            headers=headers,
+        )
+        assert retried.status_code == 422
+        assert retried.json()["error"]["code"] == "resource_pack_metadata_mismatch"
 
 
 def test_map_publish_uses_target_filesystem_for_atomic_replace(

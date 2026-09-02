@@ -120,7 +120,11 @@ Idempotency-Key: <客户端生成的唯一值>
 ### Map API
 
 - `GET /api/maps`：列出全部可用仓库地图。
-- `POST /api/maps`：multipart 上传 `map.zip`、资源和版本元数据，创建 Map。
+- `POST /api/uploads/{upload_id}`：初始化或恢复分片上传会话。
+- `PUT /api/uploads/{upload_id}/{kind}/{index}`：上传带 SHA-256 的单个分片。
+- `POST /api/uploads/{upload_id}/complete`：校验全部分片并创建 Map。
+- `DELETE /api/uploads/{upload_id}`：取消上传并清理会话。
+- `POST /api/maps`：兼容旧客户端的 multipart 上传入口。
 - `GET /api/maps/{map_id}`：查询指定 Map。
 - `DELETE /api/maps/{map_id}`：删除没有关联 Game 的 Map。
 
@@ -128,7 +132,7 @@ Idempotency-Key: <客户端生成的唯一值>
 
 - `map` 或 `map.zip`：地图压缩包；
 - `name`：名称；
-- `mc_version`：精确 Minecraft 版本；
+- `mc_version`：可选回退值；后端优先读取地图 `level.dat` 的 `Data.Version.Name`，仅旧地图无法识别时要求填写；
 - `paper_build`：可选的固定 Paper build；留空时优先复用仓库内同一 `mc_version` 最高的标准 build，没有匹配项才查询 PaperMC 最新稳定 build，并将精确编号固化到 Map；
 - Java 主版本不由客户端提交，而是根据 Paper 官方兼容表从 `mc_version` 自动确定；
 - `paper_url` 与 `paper_sha256`：可选的成对自定义制品；
@@ -147,11 +151,14 @@ Minecraft 协议使用的 SHA-1 和内部校验用 SHA-256，随后写入 `resou
 `/api` 外且不要求管理 Token，否则 Minecraft 客户端无法下载；响应使用内容哈希 URL、
 一年 immutable 缓存、ETag 和 `nosniff`。除该下载路径外，管理 API 仍受 Bearer Token 保护。
 
-上传请求在 multipart 解析期间由 ASGI 中间件累计计数，超过文件总上限和协议开销预算时
-立即返回 413，避免超大请求先填满临时磁盘。上传完成后的解压、扫描与哈希在线程池中使用
-独立数据库 Session，不阻塞唯一的 API 事件循环。前端为同一次文件选择保存
-`Idempotency-Key`；网络结果未知后再次提交会复用该键，后端按内容指纹返回原 Map，避免
-重复导入数 GiB 数据。
+管理前端按 8 MiB 分片、最多四路并发上传，每片单独校验 SHA-256；不同分片可并行落盘，
+同一分片和完成操作通过文件锁互斥。刷新后选择同一文件会复用 `upload_id`，已存在分片可
+幂等重传；完成结果也可重复读取。未完成会话 24 小时后清理，取消时立即清理；
+`MC_MAX_UPLOAD_SESSIONS` 和 `MC_MAX_UPLOAD_RESERVED_BYTES` 还会限制全局并发会话与
+逻辑预留空间。代理只需接受略大于 8 MiB 的单请求，不再需要放行 2 GiB 请求体。兼容 multipart 入口仍由 ASGI
+中间件累计计数。上传完成后的解压、扫描与哈希在线程池中使用独立数据库 Session，不阻塞
+API 事件循环。前端同时保存 `Idempotency-Key`；完成响应未知时复用同一会话和键，避免
+重复创建 Map。
 
 ### Game API
 

@@ -1,6 +1,7 @@
 import json
 import shutil
 import stat
+import unicodedata
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -15,6 +16,8 @@ class SafeZipExtractor:
     @staticmethod
     def _validate_name(name: str) -> PurePosixPath:
         normalized = name.replace("\\", "/")
+        if any(unicodedata.category(character) == "Cc" for character in normalized):
+            raise ValidationError("unsafe_archive_path", "压缩包路径不能包含控制字符")
         path = PurePosixPath(normalized)
         if path.is_absolute() or ".." in path.parts or not path.parts:
             raise ValidationError("unsafe_archive_path", f"压缩包包含非法路径: {name}")

@@ -18,8 +18,14 @@ class ManagerError(Exception):
 
 
 class ConflictError(ManagerError):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(409, code, message)
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(409, code, message, details=details)
 
 
 class NotFoundError(ManagerError):
