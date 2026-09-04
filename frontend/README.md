@@ -2,6 +2,9 @@
 
 Vue 3 + Vite + TypeScript 管理台。
 
+地图入口支持两个模式：上传包含 `level.dat` 的已有世界，或选择 Minecraft 版本创建自然生成
+模板。地图保存服务端设置默认值，创建游戏时可以覆盖并固化最终配置；启动窗口只负责端口。
+
 ```bash
 npm install
 npm run dev

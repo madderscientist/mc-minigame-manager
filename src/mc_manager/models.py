@@ -24,6 +24,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from mc_manager.enums import (
     DesiredState,
+    MapSourceType,
     ObservedState,
     PortState,
     ResourceState,
@@ -62,6 +63,11 @@ class MapRecord(Base):
         nullable=False,
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_type: Mapped[MapSourceType] = mapped_column(
+        enum_type(MapSourceType, "map_source_type"),
+        default=MapSourceType.UPLOADED,
+        nullable=False,
+    )
     mc_version: Mapped[str] = mapped_column(String(32), nullable=False)
     data_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     paper_build: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -75,6 +81,7 @@ class MapRecord(Base):
     )
     import_request_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     extra_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    server_settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -104,6 +111,7 @@ class GameRecord(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     relative_path: Mapped[str] = mapped_column(String(1024), unique=True, nullable=False)
     content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    server_settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     task_lock_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(

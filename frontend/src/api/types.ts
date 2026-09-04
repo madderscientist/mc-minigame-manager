@@ -1,4 +1,5 @@
 export type ResourceState = 'preparing' | 'ready' | 'failed'
+export type MapSourceType = 'uploaded' | 'generated'
 export type RuntimeState =
   | 'preparing'
   | 'starting'
@@ -32,16 +33,35 @@ export interface ResourcePack {
   url: string
 }
 
+export interface ServerSettings {
+  spawn_protection?: number | null
+  gamemode?: 'survival' | 'creative' | 'adventure' | 'spectator' | null
+  difficulty?: 'peaceful' | 'easy' | 'normal' | 'hard' | null
+  hardcore?: boolean | null
+  pvp?: boolean | null
+  allow_flight?: boolean | null
+  max_players?: number | null
+  white_list?: boolean | null
+  view_distance?: number | null
+  simulation_distance?: number | null
+  level_seed?: string | null
+  level_type?: string | null
+  generate_structures?: boolean | null
+  custom: Record<string, string>
+}
+
 export interface MapRecord {
   map_id: number
   state: ResourceState
   name: string
+  source_type: MapSourceType
   mc_version: string
   data_version: number | null
   paper_build: string
   java_major: number
   created_at: string
   resource_pack: ResourcePack | null
+  server_settings: ServerSettings
 }
 
 export interface Game {
@@ -59,6 +79,7 @@ export interface Game {
   port: number | null
   public_address: string | null
   backups: Backup[]
+  server_settings: ServerSettings
 }
 
 export interface Task {
@@ -128,7 +149,22 @@ export interface MapUploadInput {
   resourcePackPrompt?: string
   paperUrl?: string
   paperSha256?: string
+  serverSettings?: ServerSettings
   signal?: AbortSignal
+}
+
+export interface GenerateMapInput {
+  name: string
+  mc_version: string
+  paper_build?: string
+  paper_url?: string
+  paper_sha256?: string
+  server_settings: ServerSettings
+}
+
+export interface PaperVersion {
+  version: string
+  java_major: number
 }
 
 export interface ChunkedUploadCreated {

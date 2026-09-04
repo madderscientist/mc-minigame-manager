@@ -55,6 +55,40 @@ describe('API client', () => {
     })
   })
 
+  it('creates a generated map with managed settings and idempotency', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      response({ map_id: 8, name: 'Fresh world', mc_version: '1.21.11' }, 201),
+    )
+
+    await api.generateMap({
+      name: 'Fresh world',
+      mc_version: '1.21.11',
+      server_settings: { level_seed: '42', spawn_protection: 0, custom: {} },
+    })
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/maps/generated')
+    const init = fetchMock.mock.calls[0]?.[1]
+    expect(new Headers(init?.headers).get('Idempotency-Key')).toBeTruthy()
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      mc_version: '1.21.11',
+      server_settings: { level_seed: '42', spawn_protection: 0 },
+    })
+  })
+
+  it('sends the final server settings snapshot when creating a game', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      response({ task_id: 'task-1', game_id: 2, map_id: 1, status: 'pending' }, 202),
+    )
+
+    await api.createGame(1, 'Round', { gamemode: 'adventure', custom: {} })
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      map_id: 1,
+      name: 'Round',
+      server_settings: { gamemode: 'adventure', custom: {} },
+    })
+  })
+
   it('preserves a zero Retry-After value', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       response(
@@ -176,6 +210,7 @@ describe('API client', () => {
     expect(metadata.resource_pack_filename).toBe('visuals.zip')
     expect(metadata.resource_pack_required).toBe(true)
     expect(metadata.resource_pack_prompt).toBe('请下载材质包')
+    expect(metadata.server_settings).toBe('{}')
   })
 
   it('does not reuse an upload session for different file content', async () => {

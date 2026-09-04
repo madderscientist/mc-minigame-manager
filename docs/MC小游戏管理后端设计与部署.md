@@ -30,12 +30,17 @@ flowchart TD
 
 ### Map
 
-Map 是仓库中的不可变原始地图，类似容器 image：
+Map 是仓库中的不可变模板，类似容器 image：
 
 - 只使用 `map_id`；
-- 上传成功后不再修改内容；
+- 来源为上传的已有世界，或只含版本、生成参数和服务端配置的自然生成模板；
+- 创建成功后不再修改内容；
 - 保存 Minecraft 版本、DataVersion、Paper build、Java 主版本和制品校验信息；
+- 保存受管的 `server.properties` 默认值；
 - 一个 Map 可以创建任意多个互相独立的 Game。
+
+自然生成 Map 本身不含 `level.dat`。它创建出的每个 Game 在第一次启动 Paper 时各自生成
+世界；种子留空时各自随机，填写固定种子时可复现同一地形。
 
 ### Game
 
@@ -44,6 +49,7 @@ Game 是从 Map 创建出的持久可玩副本，类似 container 的持久工�
 - 只使用 `game_id`；
 - 通过 `map_id` 记录来源 Map；
 - 创建 Game 只复制地图并进入可启动列表，不会启动 Paper、占用端口或连接 frp；
+- 创建时可覆盖 Map 默认设置，合并后的最终配置作为 Game 快照持久化；
 - 同一个 Game 可以反复启动和停止；
 - 同一个 Game 同时最多有一个非终态 Run。
 
@@ -120,6 +126,8 @@ Idempotency-Key: <客户端生成的唯一值>
 ### Map API
 
 - `GET /api/maps`：列出全部可用仓库地图。
+- `GET /api/paper/versions`：列出当前 Java 兼容表支持的 Paper 正式版本。
+- `POST /api/maps/generated`：创建不含世界文件的自然生成 Map 模板。
 - `POST /api/uploads/{upload_id}`：初始化或恢复分片上传会话。
 - `PUT /api/uploads/{upload_id}/{kind}/{index}`：上传带 SHA-256 的单个分片。
 - `POST /api/uploads/{upload_id}/complete`：校验全部分片并创建 Map。
@@ -127,6 +135,23 @@ Idempotency-Key: <客户端生成的唯一值>
 - `POST /api/maps`：兼容旧客户端的 multipart 上传入口。
 - `GET /api/maps/{map_id}`：查询指定 Map。
 - `DELETE /api/maps/{map_id}`：删除没有关联 Game 的 Map。
+
+自然生成请求示例：
+
+```json
+{
+  "name": "随机速通",
+  "mc_version": "1.21.11",
+  "server_settings": {
+    "gamemode": "survival",
+    "difficulty": "hard",
+    "spawn_protection": 0,
+    "level_seed": null,
+    "generate_structures": true,
+    "custom": {}
+  }
+}
+```
 
 上传字段：
 
@@ -139,6 +164,13 @@ Idempotency-Key: <客户端生成的唯一值>
 - `resource_pack`：可选的单个玩家资源包 ZIP；
 - `resource_pack_required`：玩家拒绝资源包时是否拒绝进入，默认 false；
 - `resource_pack_prompt`：可选原生下载提示，最多 256 字符；
+- `server_settings`：JSON 编码的受管服务端默认设置；上传已有世界时不允许提交种子、世界类型和结构生成参数；
+
+受管设置包括出生点保护、游戏模式、难度、硬核、PVP、飞行、最大人数、白名单、视距、
+模拟距离，以及自然生成所需的种子、世界类型和结构生成。还可提交经过属性名和控制字符
+校验的自定义 `server.properties`。`server-port`、`level-name`、命令权限字段和
+`resource-pack*` 始终由系统控制。当前不编辑 `paper-global.yml`、
+`paper-world-defaults.yml`、`bukkit.yml` 或 `spigot.yml`。
 
 玩家资源包必须在 ZIP 根目录包含有效 `pack.mcmeta`，压缩包最多 250 MiB。后端计算
 Minecraft 协议使用的 SHA-1 和内部校验用 SHA-256，随后写入 `resource-pack`、
@@ -172,9 +204,18 @@ API 事件循环。前端同时保存 `Idempotency-Key`；完成响应未知时�
 ```json
 {
   "map_id": 123,
-  "name": "可选的本局名称"
+  "name": "可选的本局名称",
+  "server_settings": {
+    "gamemode": "adventure",
+    "spawn_protection": 0,
+    "custom": {}
+  }
 }
 ```
+
+`server_settings` 省略时完整继承 Map 默认值；传入时表示前端编辑后的完整最终快照，而不是
+仅包含差异的补丁。启动接口不接受服务端设置，Worker 会在创建和每次启动时重新应用 Game
+快照，并最后覆盖系统托管属性。
 
 返回 HTTP 202：
 
@@ -190,7 +231,7 @@ API 事件循环。前端同时保存 `Idempotency-Key`；完成响应未知时�
 ### 运行命令
 
 - `POST /api/start`：启动已有 Game。
-- `POST /api/stop`：停止 Game，成功停止后自动备份。
+- `POST /api/stop`：停止 Game，可选择成功停止后是否创建备份。
 - `POST /api/load`：保护当前状态后，将 Backup 原地加载回同一个 Game。
 
 启动请求：
@@ -208,9 +249,12 @@ API 事件循环。前端同时保存 `Idempotency-Key`；完成响应未知时�
 
 ```json
 {
-  "game_id": 456
+  "game_id": 456,
+  "backup": true
 }
 ```
+
+`backup` 默认为 `true`；设为 `false` 时只停止 Game 并释放端口，不创建新的恢复点。
 
 加载请求：
 
@@ -252,7 +296,7 @@ API 事件循环。前端同时保存 `Idempotency-Key`；完成响应未知时�
 
 1. API 验证 Map 并预分配 `game_id` 与 `task_id`；
 2. Worker 将不可变 Map 复制到 staging；
-3. 校验后原子发布到 Game 目录；
+3. 应用 Game 的最终服务端设置，校验后原子发布到 Game 目录；
 4. Game 进入 `ready`；
 5. 不启动容器，不分配端口。
 
@@ -262,7 +306,7 @@ API 事件循环。前端同时保存 `Idempotency-Key`；完成响应未知时�
 2. 创建内部 Run；
 3. 在 SQLite 短事务中预留端口并递增 generation；
 4. 固定 Paper build、SHA-256 与 Java 镜像；
-5. 下载并校验缺失的 Paper JAR；
+5. 重新应用 Game 设置和系统托管属性，下载并校验缺失的 Paper JAR；
 6. rootless Podman 创建容器，将 Game 挂载到 `/data`；
 7. 等待 Paper 日志 `Done (` 且 TCP 端口可连接；
 8. 标记 Run ready、端口 active、Task succeeded。
@@ -307,6 +351,7 @@ API 事件循环。前端同时保存 `Idempotency-Key`；完成响应未知时�
 - 每个端口最多绑定一个 Run；
 - `(game_id, backup_id)` 唯一；
 - `Idempotency-Key` 全局唯一。
+- Map 保存 `source_type` 和默认设置 JSON；Game 保存创建时固化的最终设置 JSON。
 
 Alembic `20260831_0002` 可迁移旧的混合 Map/active 数据：旧 repository 行进入 `maps`，旧 active 行进入 `games`，旧 instance/operation 分别进入内部 `runs` 和公开 `tasks`。旧物理 `repository/active` 路径仍受 systemd 过渡权限支持；所有新资源使用 `maps/games`。
 
@@ -418,6 +463,10 @@ sudo bash scripts/install-wsl.sh
 不让 systemd 直接读取用户 Home 下的项目文件，因为服务使用 `ProtectHome=true`，且生产
 服务不应直接信任普通用户可随时改写的密钥文件。
 
+首次安装尚未启用 `mc-manager.target` 时，安装脚本只部署文件和单元；target 已启用的升级
+安装会自动执行 Alembic 迁移，并重启 API、Worker 和 frpc 以加载新代码与配置。因此不要
+只重复执行 `systemctl enable --now`：已经运行的服务不会因为 enable 操作自动重启。
+
 启用 API 与 Worker：
 
 ```bash
@@ -454,7 +503,7 @@ Windows 还需使用任务计划程序在无人登录的冷启动时唤醒指定
 
 - 概览：运行 Game、端口余量、进行中和失败 Task；
 - 游戏：创建、启动、停止、删除，以及 Game 内部 Backup 时间线；
-- 地图：上传不可变 Map、查看运行版本、创建 Game 和安全删除；
+- 地图：上传已有世界或创建自然生成模板、配置默认服务端属性、查看运行版本、创建 Game 和安全删除；
 - 任务：显示最近 Task 的中文步骤、进度、结果和脱敏错误。
 
 `run_id` 不出现在界面。恢复 Backup 需要输入 `game_id` 二次确认；删除 Game 和 Backup

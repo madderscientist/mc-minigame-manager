@@ -18,6 +18,7 @@ from mc_manager.config import Settings
 from mc_manager.enums import DesiredState, ObservedState, ResourceState
 from mc_manager.models import MapRecord, RunRecord
 from mc_manager.runtime.fake import FakeRuntime
+from mc_manager.services.maps import MapService
 from mc_manager.worker import Worker
 from tests.conftest import make_map_zip, make_resource_pack_zip
 
@@ -64,6 +65,171 @@ def create_ready_game(
     assert task["status"] == "succeeded"
     assert task["result"] == {"game_id": body["game_id"], "map_id": map_id}
     return int(body["game_id"])
+
+
+def test_upload_map_persists_managed_server_settings(
+    app_client: tuple[TestClient, Worker, FakeRuntime],
+    settings: Settings,
+    map_zip: bytes,
+) -> None:
+    client, _worker, _runtime = app_client
+    response = client.post(
+        "/api/maps",
+        data={
+            "name": "Configured map",
+            "mc_version": "1.20.4",
+            "paper_build": "497",
+            "server_settings": json.dumps(
+                {
+                    "spawn_protection": 0,
+                    "pvp": False,
+                    "custom": {"network-compression-threshold": "512"},
+                }
+            ),
+        },
+        files={"map": ("map.zip", map_zip, "application/zip")},
+    )
+
+    assert response.status_code == 201, response.text
+    map_id = response.json()["map_id"]
+    detail = client.get(f"/api/maps/{map_id}").json()
+    assert detail["source_type"] == "uploaded"
+    assert detail["server_settings"] == {
+        "spawn_protection": 0,
+        "gamemode": None,
+        "difficulty": None,
+        "hardcore": None,
+        "pvp": False,
+        "allow_flight": None,
+        "max_players": None,
+        "white_list": None,
+        "view_distance": None,
+        "simulation_distance": None,
+        "level_seed": None,
+        "level_type": None,
+        "generate_structures": None,
+        "custom": {"network-compression-threshold": "512"},
+    }
+    properties = (settings.map_root / str(map_id) / "server.properties").read_text()
+    assert "spawn-protection=0" in properties
+    assert "pvp=false" in properties
+    assert "network-compression-threshold=512" in properties
+    assert "server-port=25565" in properties
+
+
+def test_create_generated_map_template_without_world(
+    app_client: tuple[TestClient, Worker, FakeRuntime],
+    settings: Settings,
+) -> None:
+    client, worker, _runtime = app_client
+    payload = {
+        "name": "Fresh survival",
+        "mc_version": "1.20.4",
+        "paper_build": "497",
+        "server_settings": {
+            "gamemode": "survival",
+            "difficulty": "hard",
+            "level_seed": "8675309",
+            "level_type": "minecraft:normal",
+            "generate_structures": True,
+        },
+    }
+    headers = {"Idempotency-Key": "generated-map-1"}
+
+    response = client.post("/api/maps/generated", json=payload, headers=headers)
+    duplicate = client.post("/api/maps/generated", json=payload, headers=headers)
+
+    assert response.status_code == 201, response.text
+    assert duplicate.json() == response.json()
+    map_id = response.json()["map_id"]
+    detail = client.get(f"/api/maps/{map_id}").json()
+    assert detail["source_type"] == "generated"
+    assert detail["server_settings"]["level_seed"] == "8675309"
+    map_path = settings.map_root / str(map_id)
+    assert map_path.is_dir()
+    assert not list(map_path.rglob("level.dat"))
+    properties = (map_path / "server.properties").read_text()
+    assert "level-name=world" in properties
+    assert "level-seed=8675309" in properties
+    assert "generate-structures=true" in properties
+    assert "server-port=25565" in properties
+
+    create = client.post(
+        "/api/games",
+        json={
+            "map_id": map_id,
+            "name": "Independent world",
+            "server_settings": {
+                "gamemode": "adventure",
+                "spawn_protection": 0,
+            },
+        },
+        headers={"Idempotency-Key": "generated-game-1"},
+    )
+    assert create.status_code == 202, create.text
+    create_task = run_task(client, worker, create.json()["task_id"])
+    assert create_task["status"] == "succeeded"
+    game_id = create.json()["game_id"]
+    game = client.get(f"/api/games/{game_id}").json()
+    assert game["server_settings"]["gamemode"] == "adventure"
+    assert game["server_settings"]["spawn_protection"] == 0
+    game_path = settings.game_root / str(game_id)
+    game_properties = (game_path / "server.properties").read_text()
+    assert "gamemode=adventure" in game_properties
+    assert "spawn-protection=0" in game_properties
+    assert "level-seed=" not in game_properties
+    assert not list(game_path.rglob("level.dat"))
+
+    (game_path / "server.properties").write_text(
+        game_properties + "level-seed=should-be-removed\n",
+        encoding="utf-8",
+    )
+
+    start = client.post("/api/start", json={"game_id": game_id})
+    assert start.status_code == 202, start.text
+    assert run_task(client, worker, start.json()["task_id"])["status"] == "succeeded"
+    restarted_properties = (game_path / "server.properties").read_text()
+    assert "gamemode=adventure" in restarted_properties
+    assert "level-seed=" not in restarted_properties
+    assert "server-port=25565" in restarted_properties
+
+
+def test_generated_map_retry_keeps_automatic_build_idempotent(
+    app_client: tuple[TestClient, Worker, FakeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _worker, _runtime = app_client
+    builds = iter(["497", "498"])
+    monkeypatch.setattr(
+        "mc_manager.app.latest_stable_paper_build",
+        lambda *_args, **_kwargs: next(builds),
+    )
+    original_publish = MapService.publish_generated
+    publish_attempts = 0
+
+    def fail_first_publish(self, session, record):
+        nonlocal publish_attempts
+        publish_attempts += 1
+        if publish_attempts == 1:
+            raise RuntimeError("interrupted publish")
+        return original_publish(self, session, record)
+
+    monkeypatch.setattr(MapService, "publish_generated", fail_first_publish)
+    payload = {
+        "name": "Retry generated map",
+        "mc_version": "1.20.4",
+        "server_settings": {"custom": {}},
+    }
+    headers = {"Idempotency-Key": "generated-map-retry"}
+
+    with pytest.raises(RuntimeError, match="interrupted publish"):
+        client.post("/api/maps/generated", json=payload, headers=headers)
+    response = client.post("/api/maps/generated", json=payload, headers=headers)
+
+    assert response.status_code == 201, response.text
+    assert client.get(f"/api/maps/{response.json()['map_id']}").json()[
+        "paper_build"
+    ] == "497"
 
 
 def test_map_game_start_stop_backup_load_and_delete(

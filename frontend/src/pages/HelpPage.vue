@@ -104,7 +104,7 @@ systemctl status frpc</code><button @click="copy('sudo bash scripts/install-wsl.
             <article><span>2</span><h3>创建 Game</h3><p>在 Map 卡片上点击“创建游戏”。这一步只复制持久数据，不启动 Paper、不占端口。</p></article>
             <article><span>3</span><h3>启动 Game</h3><p>进入“游戏”，点击启动。推荐自动分配端口；等待任务显示 Paper 已就绪。</p></article>
             <article><span>4</span><h3>玩家连接</h3><p>本机测试连接 WSL 地址与端口；启用 FRP 后连接公网 frps 地址和相同端口。</p></article>
-            <article><span>5</span><h3>停止并备份</h3><p>不要直接杀进程。点击“停止”，系统会优雅关闭 Paper、创建备份并释放端口。</p></article>
+            <article><span>5</span><h3>停止游戏</h3><p>不要直接杀进程。点击“停止”，可选择是否创建备份；系统会优雅关闭 Paper 并释放端口。</p></article>
             <article><span>6</span><h3>恢复备份</h3><p>在 Game 详情的备份页选择恢复。系统会先保护当前状态；恢复后保持停止，需要手动启动。</p></article>
           </div>
           <div class="guide-callout"><strong>记住资源边界</strong><p><code>map_id</code> 只表示不可变仓库地图；<code>game_id</code> 表示可反复游玩的持久游戏；Backup 永远属于一个 Game。</p></div>

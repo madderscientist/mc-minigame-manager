@@ -7,6 +7,11 @@ class ResourceState(StrEnum):
     FAILED = "failed"
 
 
+class MapSourceType(StrEnum):
+    UPLOADED = "uploaded"
+    GENERATED = "generated"
+
+
 class TaskType(StrEnum):
     CREATE_GAME = "create_game"
     DELETE_GAME = "delete_game"

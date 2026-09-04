@@ -6,6 +6,7 @@ import logging
 import os
 import secrets
 import shutil
+import time
 import uuid
 from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager, suppress
@@ -26,7 +27,7 @@ from starlette.datastructures import UploadFile
 
 from mc_manager.config import Settings, get_settings
 from mc_manager.db import Database
-from mc_manager.enums import ResourceState
+from mc_manager.enums import MapSourceType, ResourceState
 from mc_manager.errors import ConflictError, ManagerError, NotFoundError, ValidationError
 from mc_manager.middleware import RequestSizeLimitMiddleware
 from mc_manager.models import (
@@ -43,11 +44,14 @@ from mc_manager.schemas import (
     CreateGameRequest,
     DeleteGameAccepted,
     GameView,
+    GenerateMapRequest,
     LoadAccepted,
     LoadRequest,
     MapView,
+    PaperVersionView,
     PortView,
     RunningGameView,
+    ServerSettings,
     StartAccepted,
     StartRequest,
     StatusView,
@@ -57,7 +61,7 @@ from mc_manager.schemas import (
     UploadResult,
 )
 from mc_manager.services.archive import SafeZipExtractor
-from mc_manager.services.artifacts import latest_stable_paper_build
+from mc_manager.services.artifacts import latest_stable_paper_build, supported_paper_versions
 from mc_manager.services.maps import (
     RESOURCE_PACK_STORAGE_NAME,
     SAFE_RESOURCE_NAME,
@@ -91,6 +95,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     database = Database(resolved_settings)
     storage = Storage(resolved_settings.storage_root, resolved_settings.api_staging_root)
     tasks = TaskService(resolved_settings)
+    version_cache: tuple[float, list[tuple[str, int]]] | None = None
     chunked_uploads = ChunkedUploadStore(
         resolved_settings.upload_root,
         max_bytes=resolved_settings.max_upload_bytes,
@@ -198,6 +203,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ).all()
         )
 
+    @app.get("/api/paper/versions", response_model=list[PaperVersionView])
+    async def list_paper_versions() -> list[PaperVersionView]:
+        nonlocal version_cache
+        now = time.monotonic()
+        if version_cache is None or now - version_cache[0] >= 300:
+            versions = await to_thread.run_sync(
+                supported_paper_versions,
+                resolved_settings.papermc_user_agent,
+            )
+            version_cache = (now, versions)
+        return [
+            PaperVersionView(version=version, java_major=java_major)
+            for version, java_major in version_cache[1]
+        ]
+
     @app.get("/api/maps/{map_id}", response_model=MapView)
     def get_map(map_id: int, session: SessionDependency) -> MapRecord:
         record = session.get(MapRecord, map_id)
@@ -244,12 +264,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
 
+    async def resolve_paper_build(
+        mc_version: str,
+        requested_build: str | None,
+        paper_url: str | None,
+    ) -> str:
+        if requested_build:
+            return requested_build
+        if paper_url:
+            return "custom"
+        with database.session_factory() as session:
+            reusable = maps.latest_reusable_paper_build(session, mc_version)
+        if reusable is not None:
+            return reusable
+        return await to_thread.run_sync(
+            partial(
+                latest_stable_paper_build,
+                mc_version,
+                user_agent=resolved_settings.papermc_user_agent,
+            )
+        )
+
     async def import_saved_map(
         map_path: Path,
         resource_pack_path: Path | None,
         fields: dict[str, str],
         idempotency_key: str | None,
     ) -> MapRecord:
+        server_settings = _parse_server_settings(fields.get("server_settings"))
+        if any(
+            getattr(server_settings, field_name) is not None
+            for field_name in ("level_seed", "level_type", "generate_structures")
+        ):
+            raise ValidationError(
+                "world_generation_settings_not_allowed",
+                "上传已有世界时不能设置种子、世界类型或生成结构",
+            )
         map_digest, _ = await to_thread.run_sync(_file_digests, map_path)
         detected_version = await to_thread.run_sync(
             read_minecraft_version_from_zip, map_path
@@ -304,26 +354,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise ValidationError("mc_version_unsupported", str(error)) from error
         requested_paper_build = fields.get("paper_build", "").strip()
         hash_fields = dict(fields)
-        if requested_paper_build:
-            fields["paper_build"] = requested_paper_build
-        elif fields.get("paper_url", "").strip():
-            fields["paper_build"] = "custom"
-            hash_fields["paper_build"] = "custom"
-        else:
-            with database.session_factory() as session:
-                reusable_build = maps.latest_reusable_paper_build(
-                    session, fields["mc_version"]
-                )
-            if reusable_build is None:
-                reusable_build = await to_thread.run_sync(
-                    partial(
-                        latest_stable_paper_build,
-                        fields["mc_version"],
-                        user_agent=resolved_settings.papermc_user_agent,
-                    )
-                )
-            fields["paper_build"] = reusable_build
+        paper_url = fields.get("paper_url", "").strip()
+        fields["paper_build"] = await resolve_paper_build(
+            fields["mc_version"], requested_paper_build or None, paper_url or None
+        )
+        if not requested_paper_build:
             hash_fields["paper_build"] = "automatic-compatible"
+            if paper_url:
+                hash_fields["paper_build"] = "custom"
         import_hash = _map_import_hash(
             map_digest=map_digest,
             resource_pack_digest=resource_pack_digest,
@@ -335,6 +373,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
             fields=hash_fields,
             java_major=java_major,
+            server_settings=server_settings,
         )
         return await to_thread.run_sync(
             _import_map,
@@ -350,6 +389,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             idempotency_key,
             import_hash,
             resource_pack_import,
+            server_settings.model_dump(mode="json", exclude_none=True),
         )
 
     @app.post("/api/uploads/{upload_id}", status_code=201)
@@ -449,6 +489,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "resource_pack_filename",
                     "resource_pack_required",
                     "resource_pack_prompt",
+                    "server_settings",
                 }
             }
             record = await import_saved_map(
@@ -554,6 +595,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await to_thread.run_sync(_remove_tree, upload_dir)
             await form.close()
 
+    @app.post("/api/maps/generated", response_model=UploadResult, status_code=201)
+    async def generate_map(
+        request: Annotated[GenerateMapRequest, Body()],
+        idempotency_key: IdempotencyKey = None,
+    ) -> UploadResult:
+        try:
+            java_major = required_java_major(request.mc_version)
+        except ValueError as error:
+            raise ValidationError("mc_version_unsupported", str(error)) from error
+        paper_build = await resolve_paper_build(
+            request.mc_version, request.paper_build, request.paper_url
+        )
+        settings_payload = request.server_settings.model_dump(mode="json", exclude_none=True)
+        generated_hash = _generated_map_hash(
+            name=request.name,
+            mc_version=request.mc_version,
+            paper_build=request.paper_build,
+            java_major=java_major,
+            paper_url=request.paper_url,
+            paper_sha256=request.paper_sha256,
+            server_settings=settings_payload,
+        )
+        record = await to_thread.run_sync(
+            _create_generated_map,
+            database,
+            maps,
+            request.name,
+            request.mc_version,
+            paper_build,
+            java_major,
+            request.paper_url,
+            request.paper_sha256,
+            idempotency_key,
+            generated_hash,
+            settings_payload,
+        )
+        return UploadResult(
+            map_id=record.map_id,
+            name=record.name,
+            mc_version=record.mc_version,
+        )
+
     @app.delete("/api/maps/{map_id}", status_code=204)
     def delete_map(map_id: int, session: SessionDependency) -> Response:
         record = session.get(MapRecord, map_id)
@@ -616,6 +699,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             session,
             map_id=request.map_id,
             name=request.name,
+            server_settings=(
+                request.server_settings.model_dump(mode="json", exclude_none=True)
+                if request.server_settings is not None
+                else None
+            ),
             idempotency_key=idempotency_key,
         )
         return CreateGameAccepted(
@@ -853,6 +941,7 @@ def _game_view(game: GameRecord, run: RunRecord | None, settings: Settings) -> G
         port=port,
         public_address=public_address,
         backups=[BackupView.model_validate(backup) for backup in game.retained_backups],
+        server_settings=ServerSettings.model_validate(game.server_settings),
     )
 
 
@@ -931,6 +1020,49 @@ def _parse_form_bool(value: str | None, default: bool) -> bool:
     raise ValidationError("invalid_boolean", f"无效的布尔值: {value}")
 
 
+def _parse_server_settings(value: str | None) -> ServerSettings:
+    if value is None or not value.strip():
+        return ServerSettings()
+    try:
+        payload: object = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValidationError(
+            "server_settings_invalid", "服务端设置必须是有效 JSON"
+        ) from error
+    try:
+        return ServerSettings.model_validate(payload)
+    except ValueError as error:
+        raise ValidationError("server_settings_invalid", str(error)) from error
+
+
+def _generated_map_hash(
+    *,
+    name: str,
+    mc_version: str,
+    paper_build: str | None,
+    java_major: int,
+    paper_url: str | None,
+    paper_sha256: str | None,
+    server_settings: dict[str, Any],
+) -> str:
+    payload = {
+        "type": "generated_map",
+        "name": name.strip(),
+        "mc_version": mc_version.strip(),
+        "paper_build": (
+            paper_build.strip()
+            if paper_build
+            else "custom" if paper_url else "automatic-compatible"
+        ),
+        "java_major": java_major,
+        "paper_url": (paper_url or "").strip(),
+        "paper_sha256": (paper_sha256 or "").strip().lower(),
+        "server_settings": server_settings,
+    }
+    encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
 def _map_import_hash(
     *,
     map_digest: str,
@@ -939,6 +1071,7 @@ def _map_import_hash(
     resource_pack_prompt: str | None = None,
     fields: dict[str, str],
     java_major: int,
+    server_settings: ServerSettings | None = None,
 ) -> str:
     payload: dict[str, object] = {
         "map": map_digest,
@@ -951,6 +1084,9 @@ def _map_import_hash(
         "java_major": java_major,
         "paper_url": fields.get("paper_url", "").strip(),
         "paper_sha256": fields.get("paper_sha256", "").strip().lower(),
+        "server_settings": (server_settings or ServerSettings()).model_dump(
+            mode="json", exclude_none=True
+        ),
     }
     encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()
@@ -969,6 +1105,7 @@ def _import_map(
     idempotency_key: str | None,
     import_hash: str,
     resource_pack: ResourcePackImport | None,
+    server_settings: dict[str, Any],
 ) -> MapRecord:
     if idempotency_key:
         lock_digest = hashlib.sha256(idempotency_key.encode()).hexdigest()
@@ -993,6 +1130,7 @@ def _import_map(
                 idempotency_key,
                 import_hash,
                 resource_pack,
+                server_settings,
             )
     return _import_map_locked(
         database,
@@ -1007,6 +1145,7 @@ def _import_map(
         None,
         import_hash,
         resource_pack,
+        server_settings,
     )
 
 
@@ -1023,6 +1162,7 @@ def _import_map_locked(
     idempotency_key: str | None,
     import_hash: str,
     resource_pack: ResourcePackImport | None,
+    server_settings: dict[str, Any],
 ) -> MapRecord:
     with database.session_factory() as session:
         if idempotency_key:
@@ -1051,6 +1191,7 @@ def _import_map_locked(
                 paper_sha256=paper_sha256,
                 idempotency_key=idempotency_key,
                 request_hash=import_hash,
+                server_settings=server_settings,
             )
             session.commit()
         except IntegrityError:
@@ -1138,6 +1279,82 @@ def _existing_map_import(
                 session.commit()
             raise
     raise ConflictError("import_failed", "之前的地图导入失败, 请重新选择文件后再试")
+
+
+def _create_generated_map(
+    database: Database,
+    maps: MapService,
+    name: str,
+    mc_version: str,
+    paper_build: str,
+    java_major: int,
+    paper_url: str | None,
+    paper_sha256: str | None,
+    idempotency_key: str | None,
+    request_hash: str,
+    server_settings: dict[str, Any],
+) -> MapRecord:
+    lock_key = idempotency_key or f"generated:{request_hash}"
+    lock_digest = hashlib.sha256(lock_key.encode()).hexdigest()
+    lock_path = maps.storage.staging_root / f"map-import-{lock_digest}.lock"
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ConflictError(
+                "import_in_progress", "相同地图创建仍在处理中, 请稍后重试"
+            ) from error
+        with database.session_factory() as session:
+            existing = None
+            if idempotency_key:
+                existing = session.scalar(
+                    select(MapRecord).where(
+                        MapRecord.import_idempotency_key == idempotency_key
+                    )
+                )
+            if existing is not None:
+                if existing.import_request_hash != request_hash:
+                    raise ConflictError(
+                        "idempotency_key_reused",
+                        "同一 Idempotency-Key 不能用于不同地图创建",
+                    )
+                if existing.state == ResourceState.READY:
+                    return existing
+                destination = maps.storage.resolve(existing.relative_path)
+                if destination.is_dir():
+                    existing.content_sha256, _ = maps.storage.tree_digest(destination)
+                    existing.state = ResourceState.READY
+                    session.commit()
+                    return existing
+                existing.state = ResourceState.PREPARING
+                session.commit()
+                record = existing
+            else:
+                record = maps.prepare_import(
+                    session,
+                    name=name,
+                    mc_version=mc_version,
+                    paper_build=paper_build,
+                    java_major=java_major,
+                    paper_url=paper_url,
+                    paper_sha256=paper_sha256,
+                    idempotency_key=idempotency_key,
+                    request_hash=request_hash,
+                    source_type=MapSourceType.GENERATED,
+                    server_settings=server_settings,
+                )
+                session.commit()
+            try:
+                record = maps.publish_generated(session, record)
+                session.commit()
+                return record
+            except Exception:
+                session.rollback()
+                failed = session.get(MapRecord, record.map_id)
+                if failed is not None:
+                    failed.state = ResourceState.FAILED
+                    session.commit()
+                raise
 
 
 app = create_app()

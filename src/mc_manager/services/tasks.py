@@ -1,6 +1,7 @@
 import hashlib
 import json
 import uuid
+from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy import select
@@ -66,19 +67,29 @@ class TaskService:
         *,
         map_id: int,
         name: str | None,
+        server_settings: Mapping[str, object] | None,
         idempotency_key: str | None,
     ) -> tuple[TaskRecord, GameRecord]:
-        payload_hash = request_hash({"type": "create_game", "map_id": map_id, "name": name})
+        source = session.get(MapRecord, map_id)
+        if source is None or source.state != ResourceState.READY:
+            raise NotFoundError("map_not_found", "仓库地图不存在或尚未准备完成")
+        final_settings = dict(
+            source.server_settings if server_settings is None else server_settings
+        )
+        payload_hash = request_hash(
+            {
+                "type": "create_game",
+                "map_id": map_id,
+                "name": name,
+                "server_settings": final_settings,
+            }
+        )
         existing = self._idempotent(session, idempotency_key, payload_hash)
         if existing is not None:
             game = session.get(GameRecord, existing.game_id)
             if game is None:
                 raise ConflictError("task_incomplete", "幂等任务缺少游戏记录")
             return existing, game
-
-        source = session.get(MapRecord, map_id)
-        if source is None or source.state != ResourceState.READY:
-            raise NotFoundError("map_not_found", "仓库地图不存在或尚未准备完成")
 
         task_id = str(uuid.uuid4())
         game = GameRecord(
@@ -87,6 +98,7 @@ class TaskService:
             name=(name or source.name).strip(),
             relative_path=f"pending/{task_id}",
             task_lock_id=task_id,
+            server_settings=final_settings,
         )
         session.add(game)
         session.flush()

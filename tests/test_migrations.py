@@ -31,7 +31,7 @@ def test_initial_migration_creates_control_plane_schema(
     assert "operations" not in tables
     with engine.connect() as connection:
         revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-    assert revision == "20260904_0004"
+    assert revision == "20260904_0005"
     get_settings.cache_clear()
 
 
@@ -116,6 +116,12 @@ def test_nonempty_v1_schema_migrates_to_maps_and_games(monkeypatch, tmp_path: Pa
         assert connection.execute(
             text("SELECT game_id, map_id, name FROM games")
         ).all() == [(2, 1, "Game")]
+        assert connection.execute(
+            text("SELECT source_type, server_settings FROM maps")
+        ).all() == [("uploaded", "{}")]
+        assert connection.execute(text("SELECT server_settings FROM games")).all() == [
+            ("{}",)
+        ]
         assert connection.execute(text("SELECT run_id, game_id FROM runs")).all() == [
             ("run-old", 2)
         ]
@@ -138,3 +144,54 @@ def test_database_initialize_preserves_absolute_sqlite_path(tmp_path: Path) -> N
     )
     Database(settings).initialize()
     assert database_path.is_file()
+
+
+def test_v5_migration_recovers_stale_alembic_batch_tables(
+    monkeypatch, tmp_path: Path
+) -> None:
+    database_path = tmp_path / "interrupted.db"
+    monkeypatch.setenv("MC_DATABASE_URL", f"sqlite:///{database_path}")
+    get_settings.cache_clear()
+    config = Config("alembic.ini")
+    command.upgrade(config, "20260904_0004")
+    engine = create_engine(f"sqlite:///{database_path}")
+    with engine.begin() as connection:
+        now = "2026-09-05 00:00:00"
+        connection.execute(
+            text(
+                """
+                INSERT INTO maps (
+                    map_id, state, name, mc_version, paper_build, java_major,
+                    relative_path, extra_metadata, created_at, updated_at
+                ) VALUES (1, 'ready', 'Source', '1.20.4', '497', 21,
+                          'maps/1', '{}', :now, :now)
+                """
+            ),
+            {"now": now},
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO games (
+                    game_id, map_id, state, name, relative_path, created_at, updated_at
+                ) VALUES (1, 1, 'ready', 'Game', 'games/1', :now, :now)
+                """
+            ),
+            {"now": now},
+        )
+        connection.execute(text("CREATE TABLE _alembic_tmp_maps (orphan INTEGER)"))
+        connection.execute(text("CREATE TABLE _alembic_tmp_games (orphan INTEGER)"))
+
+    command.upgrade(config, "head")
+
+    inspector = inspect(engine)
+    assert "_alembic_tmp_maps" not in inspector.get_table_names()
+    assert "_alembic_tmp_games" not in inspector.get_table_names()
+    assert {column["name"] for column in inspector.get_columns("maps")} >= {
+        "source_type",
+        "server_settings",
+    }
+    assert {column["name"] for column in inspector.get_columns("games")} >= {
+        "server_settings"
+    }
+    get_settings.cache_clear()

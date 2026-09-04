@@ -40,6 +40,7 @@ class ChunkedUploadStore:
         "paper_build": "",
         "paper_url": "",
         "paper_sha256": "",
+        "server_settings": "{}",
     }
     STRING_LIMITS: ClassVar[dict[str, int]] = {
         "name": 255,
@@ -49,6 +50,7 @@ class ChunkedUploadStore:
         "paper_build": 64,
         "paper_url": 2048,
         "paper_sha256": 64,
+        "server_settings": 16 * 1024,
     }
 
     def __init__(

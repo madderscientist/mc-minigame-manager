@@ -1,9 +1,10 @@
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mc_manager.enums import (
+    MapSourceType,
     ObservedState,
     PortState,
     ResourceState,
@@ -19,6 +20,80 @@ class ApiModel(BaseModel):
         if isinstance(value, datetime):
             return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
         return value
+
+
+STRUCTURED_SERVER_PROPERTIES = {
+    "allow-flight",
+    "difficulty",
+    "gamemode",
+    "generate-structures",
+    "hardcore",
+    "level-seed",
+    "level-type",
+    "max-players",
+    "pvp",
+    "simulation-distance",
+    "spawn-protection",
+    "view-distance",
+    "white-list",
+}
+RESERVED_SERVER_PROPERTIES = {
+    "enable-command-block",
+    "function-permission-level",
+    "level-name",
+    "op-permission-level",
+    "server-port",
+}
+
+
+class ServerSettings(ApiModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    spawn_protection: int | None = Field(default=None, ge=0, le=10_000)
+    gamemode: Literal["survival", "creative", "adventure", "spectator"] | None = None
+    difficulty: Literal["peaceful", "easy", "normal", "hard"] | None = None
+    hardcore: bool | None = None
+    pvp: bool | None = None
+    allow_flight: bool | None = None
+    max_players: int | None = Field(default=None, ge=1, le=10_000)
+    white_list: bool | None = None
+    view_distance: int | None = Field(default=None, ge=3, le=32)
+    simulation_distance: int | None = Field(default=None, ge=3, le=32)
+    level_seed: str | None = Field(default=None, max_length=128)
+    level_type: str | None = Field(default=None, min_length=1, max_length=128)
+    generate_structures: bool | None = None
+    custom: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("level_seed", "level_type", mode="before")
+    @classmethod
+    def empty_world_setting_is_unset(cls, value: Any) -> Any:
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @model_validator(mode="after")
+    def validate_custom_properties(self) -> Self:
+        for key, value in self.custom.items():
+            normalized_key = key.strip().lower()
+            if not normalized_key or len(key) > 128:
+                raise ValueError("自定义属性名不能为空且不能超过 128 个字符")
+            if any(
+                character
+                not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"
+                for character in key
+            ):
+                raise ValueError(f"自定义属性名无效: {key}")
+            if normalized_key in STRUCTURED_SERVER_PROPERTIES:
+                raise ValueError(f"自定义属性与结构化字段重复: {key}")
+            if normalized_key in RESERVED_SERVER_PROPERTIES or normalized_key.startswith(
+                "resource-pack"
+            ):
+                raise ValueError(f"不能覆盖系统托管属性: {key}")
+            if len(value) > 1024 or any(character in value for character in "\r\n\0"):
+                raise ValueError(f"自定义属性值无效: {key}")
+        for field_name in ("level_seed", "level_type"):
+            value = getattr(self, field_name)
+            if value is not None and any(character in value for character in "\r\n\0"):
+                raise ValueError(f"{field_name} 不能包含控制字符")
+        return self
 
 
 class BackupView(ApiModel):
@@ -49,12 +124,14 @@ class MapView(ApiModel):
     map_id: int
     state: ResourceState
     name: str
+    source_type: MapSourceType
     mc_version: str
     data_version: int | None
     paper_build: str
     java_major: int
     created_at: datetime
     resource_pack: ResourcePackView | None
+    server_settings: ServerSettings
 
 
 class GameView(ApiModel):
@@ -74,6 +151,7 @@ class GameView(ApiModel):
     port: int | None = None
     public_address: str | None = None
     backups: list[BackupView] = Field(default_factory=list)
+    server_settings: ServerSettings
 
 
 class CreateGameRequest(ApiModel):
@@ -81,6 +159,18 @@ class CreateGameRequest(ApiModel):
 
     map_id: int = Field(gt=0)
     name: str | None = Field(default=None, min_length=1, max_length=255)
+    server_settings: ServerSettings | None = None
+
+
+class GenerateMapRequest(ApiModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=255)
+    mc_version: str = Field(min_length=1, max_length=32)
+    paper_build: str | None = Field(default=None, min_length=1, max_length=64)
+    paper_url: str | None = Field(default=None, max_length=2048)
+    paper_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    server_settings: ServerSettings = Field(default_factory=ServerSettings)
 
 
 class StartRequest(ApiModel):
@@ -184,6 +274,11 @@ class UploadResult(ApiModel):
     map_id: int
     name: str
     mc_version: str
+
+
+class PaperVersionView(ApiModel):
+    version: str
+    java_major: int
 
 
 class ErrorBody(ApiModel):

@@ -2,9 +2,12 @@ import type {
   ApiErrorBody,
   ChunkedUploadCreated,
   Game,
+  GenerateMapInput,
   MapRecord,
   MapUploadInput,
   MapUploadResult,
+  PaperVersion,
+  ServerSettings,
   Status,
   Task,
   TaskAccepted,
@@ -172,11 +175,18 @@ export const api = {
   health: () => request<{ status: string }>('/healthz'),
   maps: () => request<MapRecord[]>('/api/maps'),
   map: (mapId: number) => request<MapRecord>(`/api/maps/${mapId}`),
+  paperVersions: () => request<PaperVersion[]>('/api/paper/versions'),
+  generateMap: (input: GenerateMapInput) =>
+    command<MapUploadResult>('/api/maps/generated', input, 'generate-map'),
   deleteMap: (mapId: number) => request<void>(`/api/maps/${mapId}`, { method: 'DELETE' }),
   games: () => request<Game[]>('/api/games'),
   game: (gameId: number) => request<Game>(`/api/games/${gameId}`),
-  createGame: (mapId: number, name?: string) => {
-    const body = { map_id: mapId, name: name || null }
+  createGame: (mapId: number, name?: string, serverSettings?: ServerSettings) => {
+    const body = {
+      map_id: mapId,
+      name: name || null,
+      server_settings: serverSettings ?? null,
+    }
     return command<TaskAccepted>('/api/games', body, 'create-game')
   },
   deleteGame: (gameId: number) =>
@@ -212,6 +222,7 @@ async function uploadMap(input: MapUploadInput, onProgress: (value: number) => v
     paperBuild: input.paperBuild ?? '',
     paperUrl: input.paperUrl ?? '',
     paperSha256: input.paperSha256 ?? '',
+    serverSettings: input.serverSettings ?? null,
   })
   const storageKey = 'mc-manager-idempotency:upload-map'
   const candidate = readSavedIdempotency(storageKey)
@@ -245,6 +256,7 @@ async function uploadMap(input: MapUploadInput, onProgress: (value: number) => v
     paper_build: input.paperBuild ?? '',
     paper_url: input.paperUrl ?? '',
     paper_sha256: input.paperSha256 ?? '',
+    server_settings: JSON.stringify(input.serverSettings ?? {}),
   }
   try {
     const created = await request<ChunkedUploadCreated>(`/api/uploads/${uploadId}`, {

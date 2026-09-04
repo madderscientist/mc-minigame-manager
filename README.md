@@ -2,15 +2,22 @@
 
 运行于 Windows WSL2 的 Minecraft 小游戏控制平面，使用 Python、FastAPI、SQLite WAL、rootless Podman、systemd 和全局 frpc。
 
+![](./READMEsrc/screenshot1.jpg)
+![](./READMEsrc/screenshot2.jpg)
+
 ## 领域模型
 
-- `Map / map_id`：仓库中的不可变原始地图，类似 image。
+- `Map / map_id`：仓库中的不可变模板，来源可以是上传世界或自然生成配置，类似 image。
 - `Game / game_id`：从 Map 创建的持久可玩副本，类似带持久卷的 container。
 - `Run / run_id`：Game 的一次临时运行，仅供后端内部使用。
 - `Backup / backup_id`：Game 内部有限时间线上的恢复点。
 - `Task / task_id`：创建、启动、停止、恢复或删除的异步任务。
 
 Map 与 Game 使用不同 ID 空间；API 不公开 `run_id`。
+
+地图可以保存受管的 `server.properties` 默认值；创建 Game 时可以覆盖，并把最终配置固化到
+Game。自然生成 Map 不预先创建世界，每个 Game 首次启动 Paper 时独立生成世界；种子留空
+表示随机，填写固定种子则可复现。
 
 ## 项目目录结构
 
@@ -118,6 +125,11 @@ MC_RESOURCE_PACK_BASE_URL=https://packs.example.com
 ```
 
 上传 Map 时单独选择一个资源包 ZIP。系统会验证根级 `pack.mcmeta`，计算 SHA-1，写入 `server.properties`，并通过无需管理 Token 的 `/resource-packs/` 路由提供下载。Paper 负责通知客户端，不负责托管本地文件；公网地址必须通过 FRP 或已有 HTTPS 反向代理到达 API。
+
+管理台“添加地图”同时支持上传已有世界和创建自然生成模板。两种模式都可以设置出生点保护、
+游戏模式、难度、PVP、飞行、人数、白名单、视距和受校验的自定义 `server.properties`；
+种子、世界类型和结构生成仅适用于自然生成模板。端口、世界目录、命令权限和资源包字段由
+系统托管，不能通过自定义键覆盖。当前不编辑 Paper/Bukkit/Spigot YAML。
 
 质量检查：
 ```bash

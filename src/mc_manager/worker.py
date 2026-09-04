@@ -32,8 +32,8 @@ from mc_manager.services.ports import PortService
 from mc_manager.services.server_properties import (
     PAPER_PERMISSION_PROPERTIES,
     update_server_operators,
-    update_server_properties,
 )
+from mc_manager.services.server_settings import apply_server_settings
 from mc_manager.services.storage import Storage
 
 logger = logging.getLogger(__name__)
@@ -160,6 +160,15 @@ class Worker:
                     game_path,
                     prefix=f"create-game-{game.game_id}",
                 )
+            apply_server_settings(
+                game_path / "server.properties",
+                game.server_settings,
+                inherited=source.server_settings,
+                forced={
+                    **PAPER_PERMISSION_PROPERTIES,
+                    "server-port": "25565",
+                },
+            )
             game.content_sha256, _ = self.storage.tree_digest(game_path)
             game.state = ResourceState.READY
             self._unlock(game, task_id)
@@ -222,9 +231,14 @@ class Worker:
             session.commit()
             game_path = self.storage.resolve(game.relative_path)
             self.artifacts.accept_eula(game_path)
-            update_server_properties(
+            apply_server_settings(
                 game_path / "server.properties",
-                PAPER_PERMISSION_PROPERTIES,
+                game.server_settings,
+                inherited=game.map.server_settings,
+                forced={
+                    **PAPER_PERMISSION_PROPERTIES,
+                    "server-port": "25565",
+                },
             )
             update_server_operators(
                 game_path / "ops.json",

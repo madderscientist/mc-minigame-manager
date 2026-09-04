@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import shutil
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -9,7 +10,7 @@ from urllib.parse import quote, urlparse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from mc_manager.enums import ResourceState
+from mc_manager.enums import MapSourceType, ResourceState
 from mc_manager.errors import ValidationError
 from mc_manager.models import MapRecord
 from mc_manager.services.archive import SafeZipExtractor
@@ -17,6 +18,7 @@ from mc_manager.services.server_properties import (
     PAPER_PERMISSION_PROPERTIES,
     update_server_properties,
 )
+from mc_manager.services.server_settings import apply_server_settings
 from mc_manager.services.storage import Storage
 from mc_manager.services.versions import read_data_version, required_java_major
 
@@ -78,6 +80,8 @@ class MapService:
         paper_sha256: str | None,
         idempotency_key: str | None,
         request_hash: str,
+        source_type: MapSourceType = MapSourceType.UPLOADED,
+        server_settings: Mapping[str, object] | None = None,
     ) -> MapRecord:
         if not name.strip():
             raise ValidationError("name_required", "地图名称不能为空")
@@ -105,6 +109,7 @@ class MapService:
         record = MapRecord(
             state=ResourceState.PREPARING,
             name=name.strip(),
+            source_type=source_type,
             mc_version=mc_version.strip(),
             paper_build=paper_build.strip(),
             java_major=java_major,
@@ -114,6 +119,7 @@ class MapService:
             import_idempotency_key=idempotency_key,
             import_request_hash=request_hash,
             extra_metadata={},
+            server_settings=dict(server_settings or {}),
         )
         session.add(record)
         session.flush()
@@ -137,6 +143,10 @@ class MapService:
             bundled_resource_pack = staging / "resources.zip"
             had_bundled_resource_pack = bundled_resource_pack.is_file()
             self._normalize_server_root(staging)
+            apply_server_settings(
+                staging / "server.properties",
+                record.server_settings,
+            )
             if had_bundled_resource_pack and not bundled_resource_pack.is_file():
                 bundled_resource_pack = staging / "world" / "resources.zip"
             selected_resource_pack = resource_pack
@@ -157,6 +167,37 @@ class MapService:
                 staging,
                 destination,
                 prefix=f"publish-map-{record.map_id}",
+            )
+            shutil.rmtree(staging, ignore_errors=True)
+            record.state = ResourceState.READY
+            session.flush()
+            return record
+        except Exception:
+            record.state = ResourceState.FAILED
+            shutil.rmtree(staging, ignore_errors=True)
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
+
+    def publish_generated(self, session: Session, record: MapRecord) -> MapRecord:
+        destination = self.storage.resolve(record.relative_path)
+        staging = self.storage.staging_path(f"generate-map-{record.map_id}")
+        try:
+            staging.mkdir(mode=0o770, parents=True)
+            apply_server_settings(
+                staging / "server.properties",
+                record.server_settings,
+                forced={
+                    **PAPER_PERMISSION_PROPERTIES,
+                    "level-name": "world",
+                    "server-port": "25565",
+                },
+            )
+            digest, _ = self.storage.tree_digest(staging)
+            record.content_sha256 = digest
+            self.storage.copy_tree_atomic(
+                staging,
+                destination,
+                prefix=f"publish-generated-map-{record.map_id}",
             )
             shutil.rmtree(staging, ignore_errors=True)
             record.state = ResourceState.READY

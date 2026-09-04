@@ -4,7 +4,11 @@ from typing import Any
 import pytest
 
 from mc_manager.errors import ValidationError
-from mc_manager.services.artifacts import ArtifactManager, latest_stable_paper_build
+from mc_manager.services.artifacts import (
+    ArtifactManager,
+    latest_stable_paper_build,
+    supported_paper_versions,
+)
 
 
 class FakeResponse:
@@ -30,6 +34,29 @@ def test_selects_latest_stable_paper_build(monkeypatch: pytest.MonkeyPatch) -> N
         latest_stable_paper_build("1.20.4", user_agent="test/1.0 (test@example.com)")
         == "497"
     )
+
+
+def test_lists_supported_release_versions(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "versions": {
+            "26.1": ["26.1.2", "26.1-rc1"],
+            "1.21": ["1.21.11", "1.21.11-pre1"],
+            "1.6": ["1.6.4"],
+        }
+    }
+    monkeypatch.setattr("httpx.get", lambda *args, **kwargs: FakeResponse(payload))
+
+    assert supported_paper_versions("test/1.0 (test@example.com)") == [
+        ("26.1.2", 25),
+        ("1.21.11", 21),
+    ]
+
+
+def test_rejects_invalid_paper_version_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("httpx.get", lambda *args, **kwargs: FakeResponse({"versions": []}))
+
+    with pytest.raises(ValidationError, match="返回格式无效"):
+        supported_paper_versions("test/1.0 (test@example.com)")
 
 
 def test_resolves_exact_stable_paper_build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

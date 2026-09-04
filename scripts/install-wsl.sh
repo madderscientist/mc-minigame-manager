@@ -315,4 +315,10 @@ systemctl daemon-reload
 
 echo "安装完成。唯一配置源是: $LOCAL_CONFIG_DIR"
 echo "直接用 VS Code 编辑该目录；修改后重新运行本脚本部署配置。"
-echo "配置完成后执行: systemctl enable --now mc-manager.target"
+if systemctl is-enabled --quiet mc-manager.target; then
+  echo "mc-manager.target 已启用，执行数据库迁移并重启生产服务。"
+  systemctl restart mc-manager-migrate.service
+  systemctl restart mc-manager-api.service mc-manager-worker.service frpc.service
+else
+  echo "配置完成后执行: systemctl enable --now mc-manager.target"
+fi

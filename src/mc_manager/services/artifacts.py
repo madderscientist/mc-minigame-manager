@@ -1,5 +1,6 @@
 import hashlib
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,7 @@ from urllib.parse import urlparse
 import httpx
 
 from mc_manager.errors import ValidationError
+from mc_manager.services.versions import required_java_major
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,8 +19,10 @@ class PaperArtifact:
     sha256: str
 
 
-def _fetch_paper_builds(mc_version: str, user_agent: str) -> list[Any]:
-    endpoint = f"https://fill.papermc.io/v3/projects/paper/versions/{mc_version}/builds"
+RELEASE_VERSION = re.compile(r"^\d+\.\d+(?:\.\d+)?$")
+
+
+def _fetch_papermc_json(endpoint: str, user_agent: str, subject: str) -> Any:
     try:
         response = httpx.get(
             endpoint,
@@ -30,8 +34,40 @@ def _fetch_paper_builds(mc_version: str, user_agent: str) -> list[Any]:
             raise ValidationError("papermc_redirect_rejected", "拒绝 PaperMC API 重定向")
         response.raise_for_status()
     except httpx.HTTPError as error:
-        raise ValidationError("papermc_unavailable", "暂时无法查询 PaperMC build") from error
-    payload: Any = response.json()
+        raise ValidationError(
+            "papermc_unavailable", f"暂时无法查询 PaperMC {subject}"
+        ) from error
+    try:
+        return response.json()
+    except ValueError as error:
+        raise ValidationError("papermc_response_invalid", "PaperMC 返回格式无效") from error
+
+
+def supported_paper_versions(user_agent: str) -> list[tuple[str, int]]:
+    payload = _fetch_papermc_json(
+        "https://fill.papermc.io/v3/projects/paper", user_agent, "版本"
+    )
+    versions = payload.get("versions") if isinstance(payload, dict) else None
+    if not isinstance(versions, dict):
+        raise ValidationError("papermc_response_invalid", "PaperMC 返回格式无效")
+    supported: list[tuple[str, int]] = []
+    for releases in versions.values():
+        if not isinstance(releases, list):
+            raise ValidationError("papermc_response_invalid", "PaperMC 返回格式无效")
+        for release in releases:
+            if not isinstance(release, str) or RELEASE_VERSION.fullmatch(release) is None:
+                continue
+            try:
+                java_major = required_java_major(release)
+            except ValueError:
+                continue
+            supported.append((release, java_major))
+    return list(dict.fromkeys(supported))
+
+
+def _fetch_paper_builds(mc_version: str, user_agent: str) -> list[Any]:
+    endpoint = f"https://fill.papermc.io/v3/projects/paper/versions/{mc_version}/builds"
+    payload = _fetch_papermc_json(endpoint, user_agent, "build")
     if not isinstance(payload, list):
         raise ValidationError("papermc_response_invalid", "PaperMC 返回格式无效")
     return payload
