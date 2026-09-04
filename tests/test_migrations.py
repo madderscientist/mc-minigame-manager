@@ -31,7 +31,7 @@ def test_initial_migration_creates_control_plane_schema(
     assert "operations" not in tables
     with engine.connect() as connection:
         revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-    assert revision == "20260831_0003"
+    assert revision == "20260904_0004"
     get_settings.cache_clear()
 
 
@@ -120,8 +120,8 @@ def test_nonempty_v1_schema_migrates_to_maps_and_games(monkeypatch, tmp_path: Pa
             ("run-old", 2)
         ]
         assert connection.execute(
-            text("SELECT task_id, map_id, game_id, run_id FROM tasks")
-        ).all() == [("task-old", 1, 2, "run-old")]
+            text("SELECT task_id, map_id, game_id, run_id, backup_requested FROM tasks")
+        ).all() == [("task-old", 1, 2, "run-old", 1)]
         assert connection.scalar(text("SELECT game_id FROM backups")) == 2
         assert connection.scalar(text("SELECT run_id FROM port_leases")) == "run-old"
     get_settings.cache_clear()

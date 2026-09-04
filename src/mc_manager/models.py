@@ -220,6 +220,7 @@ class TaskRecord(Base):
     )
     backup_id: Mapped[str | None] = mapped_column(String(32))
     requested_port: Mapped[int | None] = mapped_column(Integer)
+    backup_requested: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     run_id: Mapped[str | None] = mapped_column(
         ForeignKey("runs.run_id", ondelete="SET NULL"), index=True
     )

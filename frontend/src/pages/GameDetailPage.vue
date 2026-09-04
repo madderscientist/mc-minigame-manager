@@ -9,6 +9,7 @@ import CopyAddress from '../components/CopyAddress.vue'
 import EmptyState from '../components/EmptyState.vue'
 import QueryError from '../components/QueryError.vue'
 import StatusBadge from '../components/StatusBadge.vue'
+import StopGameDialog from '../components/StopGameDialog.vue'
 import TaskProgress from '../components/TaskProgress.vue'
 import type { Backup } from '../api/types'
 import { useTaskStore } from '../stores/tasks'
@@ -26,7 +27,7 @@ const hasActiveTask=computed(()=>statusQuery.isError.value||gameTasks.value.some
 const canDelete=computed(()=>Boolean(game.value&&game.value.state!=='preparing'&&!hasActiveTask.value&&(!game.value.runtime_state||['stopped','failed'].includes(game.value.runtime_state))))
 
 async function start(){if(busy.value||!canStart.value)return;busy.value=true;try{const accepted=await api.start(gameId,port.value?Number(port.value):undefined);taskStore.track(accepted);toasts.push('启动任务已提交','','success');startOpen.value=false;port.value='';await refresh()}catch(r){toasts.push('启动失败',r instanceof ApiError?r.message:'','danger')}finally{busy.value=false}}
-async function stop(){if(busy.value||!canStop.value)return;busy.value=true;try{const accepted=await api.stop(gameId);taskStore.track(accepted);toasts.push('停止任务已提交','完成后会自动备份','success');stopOpen.value=false;await refresh()}catch(r){toasts.push('停止失败',r instanceof ApiError?r.message:'','danger')}finally{busy.value=false}}
+async function stop(backup:boolean){if(busy.value||!canStop.value)return;busy.value=true;try{const accepted=await api.stop(gameId,backup);taskStore.track(accepted);toasts.push('停止任务已提交',backup?'完成后会创建备份':'本次停止不会创建备份','success');stopOpen.value=false;await refresh()}catch(r){toasts.push('停止失败',r instanceof ApiError?r.message:'','danger')}finally{busy.value=false}}
 async function restore(){if(busy.value||hasActiveTask.value||!restoreTarget.value)return;busy.value=true;try{const accepted=await api.load(gameId,restoreTarget.value.backup_id);taskStore.track(accepted);toasts.push('恢复任务已提交','当前状态会先创建保护备份','success');restoreTarget.value=null;tab.value='tasks';await refresh()}catch(r){toasts.push('恢复失败',r instanceof ApiError?r.message:'','danger')}finally{busy.value=false}}
 async function removeBackup(){if(busy.value||hasActiveTask.value||!deleteBackupTarget.value)return;busy.value=true;try{await api.deleteBackup(gameId,deleteBackupTarget.value.backup_id);toasts.push('备份已删除','','success');deleteBackupTarget.value=null;await gameQuery.refetch()}catch(r){toasts.push('删除失败',r instanceof ApiError?r.message:'','danger')}finally{busy.value=false}}
 async function removeGame(){if(busy.value||!canDelete.value)return;busy.value=true;try{const accepted=await api.deleteGame(gameId);taskStore.track(accepted);toasts.push('删除任务已提交','','success');deleteOpen.value=false;await router.push('/games')}catch(r){toasts.push('无法删除游戏',r instanceof ApiError?r.message:'','danger')}finally{busy.value=false}}
@@ -50,10 +51,10 @@ function closeStart(){if(!busy.value)startOpen.value=false}
       </template>
       <section v-else-if="tab==='backups'" class="panel backup-panel"><div class="panel-heading"><div><span class="section-index">02</span><h2>备份时间线</h2></div><small>自动保留有限数量</small></div>
         <div v-if="backups.length" class="backup-timeline"><article v-for="backup in backups" :key="backup.backup_id" class="backup-row"><div class="timeline-dot" :class="backup.clean_shutdown?'clean':'dirty'"/><div class="backup-main"><div><strong>{{ formatDate(backup.created_at) }}</strong><StatusBadge :label="backup.clean_shutdown?'干净备份':'非正常快照'" :tone="backup.clean_shutdown?'success':'danger'"/></div><span>{{ reasonLabel(backup.reason) }} · {{ formatBytes(backup.size_bytes) }}</span><code>{{ backup.backup_id }}</code></div><div class="row-actions"><button class="button small ghost" :disabled="hasActiveTask" @click="restoreTarget=backup">恢复</button><button class="icon-button danger-text" :disabled="hasActiveTask" title="删除备份" @click="deleteBackupTarget=backup">×</button></div></article></div>
-        <EmptyState v-else title="还没有备份" description="游戏正常停止后会自动创建第一个备份。" icon="◌"/>
+        <EmptyState v-else title="还没有备份" description="停止游戏时可以选择创建第一个备份。" icon="◌"/>
       </section>
       <section v-else class="panel"><div class="panel-heading"><div><span class="section-index">03</span><h2>任务记录</h2></div></div><div v-if="gameTasks.length" class="task-list"><article v-for="task in gameTasks" :key="task.task_id" class="task-list-row"><div><strong>{{ taskTypeLabels[task.type] }}</strong><small>{{ formatDate(task.created_at) }}</small></div><TaskProgress :task="task" compact/></article></div><EmptyState v-else title="没有任务记录" description="该游戏尚未执行创建以外的操作。" icon="↻"/></section>
-      <ConfirmDialog :open="stopOpen" title="停止游戏" :description="game.runtime_state==='unknown'?'运行状态未知。系统将尝试终止对应容器，并根据实际退出结果创建备份。':'Paper 将优雅停止，随后自动创建备份并释放端口。'" confirm-label="停止并备份" danger :busy="busy" @close="stopOpen=false" @confirm="stop"/>
+      <StopGameDialog :open="stopOpen" :game-name="game.name" :unknown-state="game.runtime_state==='unknown'" :busy="busy" @close="stopOpen=false" @confirm="stop"/>
       <ConfirmDialog :open="Boolean(restoreTarget)" title="恢复历史备份" :description="`当前状态会先创建保护备份，然后用 ${formatDate(restoreTarget?.created_at)} 的内容覆盖 Game #${gameId}。恢复完成后不会自动启动。`" :confirm-text="String(gameId)" confirm-label="保护并恢复" danger :busy="busy" @close="restoreTarget=null" @confirm="restore"/>
       <ConfirmDialog :open="Boolean(deleteBackupTarget)" title="删除备份" :description="`将永久删除 ${formatDate(deleteBackupTarget?.created_at)} 的恢复点。`" :confirm-text="deleteBackupTarget?.backup_id" confirm-label="永久删除" danger :busy="busy" @close="deleteBackupTarget=null" @confirm="removeBackup"/>
       <ConfirmDialog :open="deleteOpen" title="删除整个游戏" description="将删除游戏数据和全部内部备份。运行中的游戏不能删除。" :confirm-text="String(gameId)" confirm-label="永久删除游戏" danger :busy="busy" @close="deleteOpen=false" @confirm="removeGame"/>

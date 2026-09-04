@@ -4,12 +4,14 @@ import io
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import nbtlib
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import event
-from starlette.datastructures import FormData
+from starlette.datastructures import FormData, State
 
 from mc_manager.app import _map_import_hash, create_app
 from mc_manager.config import Settings
@@ -18,6 +20,10 @@ from mc_manager.models import MapRecord, RunRecord
 from mc_manager.runtime.fake import FakeRuntime
 from mc_manager.worker import Worker
 from tests.conftest import make_map_zip, make_resource_pack_zip
+
+
+def app_state(client: TestClient) -> State:
+    return cast(FastAPI, client.app).state
 
 
 def make_versioned_map_zip(version: str) -> bytes:
@@ -219,7 +225,7 @@ def test_paper_permissions_are_enforced_on_import_and_start(
     )
     map_id = upload_map(client, archive)
     map_properties = (
-        client.app.state.settings.map_root / str(map_id) / "server.properties"
+        app_state(client).settings.map_root / str(map_id) / "server.properties"
     ).read_text()
     assert "enable-command-block=true" in map_properties
     assert "function-permission-level=4" in map_properties
@@ -227,7 +233,7 @@ def test_paper_permissions_are_enforced_on_import_and_start(
 
     game_id = create_ready_game(client, worker, map_id)
     properties_path = (
-        client.app.state.settings.game_root / str(game_id) / "server.properties"
+        app_state(client).settings.game_root / str(game_id) / "server.properties"
     )
     properties_path.write_text(
         properties_path.read_text()
@@ -271,7 +277,7 @@ def test_game_list_avoids_per_game_run_queries(
         if statement.lstrip().upper().startswith("SELECT"):
             statements.append(statement)
 
-    engine = client.app.state.database.engine
+    engine = app_state(client).database.engine
     event.listen(engine, "before_cursor_execute", capture_statement)
     try:
         response = client.get("/api/games")
@@ -289,7 +295,7 @@ def test_game_views_use_latest_run(
     client, worker, _runtime = app_client
     game_id = create_ready_game(client, worker, upload_map(client, map_zip))
     now = datetime.now(UTC)
-    with client.app.state.database.session_factory.begin() as session:
+    with app_state(client).database.session_factory.begin() as session:
         session.add_all(
             [
                 RunRecord(
@@ -510,7 +516,7 @@ def test_chunked_complete_is_idempotent_if_result_write_crashes(
         )
         assert response.status_code == 204
 
-    store = client.app.state.chunked_uploads
+    store = app_state(client).chunked_uploads
     original_finish = store.finish
 
     def crash_before_result(*_args: object, **_kwargs: object) -> None:
@@ -637,7 +643,7 @@ def test_resource_pack_is_configured_and_publicly_downloadable(
         assert create.status_code == 202, create.text
         worker = Worker(
             configured,
-            client.app.state.database,
+            app_state(client).database,
             FakeRuntime(),
             worker_id="resource-pack-test-worker",
         )
@@ -797,7 +803,7 @@ def test_interrupted_import_recovers_bundled_resource_pack_metadata(
         assert first.status_code == 201, first.text
         map_id = first.json()["map_id"]
         expected = client.get(f"/api/maps/{map_id}").json()["resource_pack"]
-        with client.app.state.database.session_factory.begin() as session:
+        with app_state(client).database.session_factory.begin() as session:
             record = session.get(MapRecord, map_id)
             assert record is not None
             record.state = ResourceState.PREPARING
@@ -855,7 +861,7 @@ def test_interrupted_import_rejects_resource_pack_url_digest_mismatch(
             ),
             encoding="utf-8",
         )
-        with client.app.state.database.session_factory.begin() as session:
+        with app_state(client).database.session_factory.begin() as session:
             record = session.get(MapRecord, map_id)
             assert record is not None
             record.state = ResourceState.PREPARING
@@ -961,7 +967,7 @@ def test_map_import_removes_untrusted_resource_pack_url(
     )
     map_id = upload_map(client, archive)
     properties = (
-        client.app.state.settings.map_root / str(map_id) / "server.properties"
+        app_state(client).settings.map_root / str(map_id) / "server.properties"
     ).read_text()
     assert "motd=Trusted map" in properties
     assert "resource-pack=" not in properties
@@ -1024,7 +1030,7 @@ def test_map_upload_resumes_interrupted_record_after_crash(
         fields=fields,
         java_major=21,
     )
-    with client.app.state.database.session_factory() as session:
+    with app_state(client).database.session_factory() as session:
         record = MapRecord(
             state=interrupted_state,
             name="Recovered map",
@@ -1050,7 +1056,7 @@ def test_map_upload_resumes_interrupted_record_after_crash(
     )
     assert response.status_code == 201
     assert response.json()["map_id"] == expected_map_id
-    assert (client.app.state.settings.map_root / str(expected_map_id)).is_dir()
+    assert (app_state(client).settings.map_root / str(expected_map_id)).is_dir()
 
 
 def test_map_upload_rejects_oversized_request_before_form_parsing(
@@ -1101,6 +1107,35 @@ def test_map_upload_closes_form_files_on_early_validation_error(
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "duplicate_map"
     assert closed
+
+
+def test_stop_without_backup_releases_game_and_port(
+    app_client: tuple[TestClient, Worker, FakeRuntime],
+    map_zip: bytes,
+    upload_map,
+) -> None:
+    client, worker, _runtime = app_client
+    map_id = upload_map(client, map_zip)
+    game_id = create_ready_game(client, worker, map_id)
+    start = client.post("/api/start", json={"game_id": game_id}).json()
+    run_task(client, worker, start["task_id"])
+
+    stop = client.post("/api/stop", json={"game_id": game_id, "backup": False})
+    assert stop.status_code == 202
+    stopped = run_task(client, worker, stop.json()["task_id"])
+    assert stopped["status"] == "succeeded"
+    assert stopped["result"] == {
+        "game_id": game_id,
+        "backup_id": None,
+        "clean_shutdown": True,
+    }
+    assert client.get(f"/api/games/{game_id}/backups").json() == []
+
+    status_body = client.get("/api/status").json()
+    assert status_body["running_games"] == []
+    port = next(item for item in status_body["ports"] if item["port"] == start["port"])
+    assert port["state"] == "free"
+    assert port["game_id"] is None
 
 
 def test_backup_failure_releases_stopped_game(

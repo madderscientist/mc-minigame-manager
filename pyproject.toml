@@ -60,3 +60,7 @@ plugins = ["pydantic.mypy", "sqlalchemy.ext.mypy.plugin"]
 [tool.pydantic-mypy]
 init_forbid_extra = true
 warn_required_dynamic_aliases = true
+
+[tool.pyright]
+typeCheckingMode = "basic"
+strict = ["src"]

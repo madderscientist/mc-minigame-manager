@@ -232,9 +232,10 @@ class TaskService:
         session: Session,
         *,
         game_id: int,
+        backup: bool,
         idempotency_key: str | None,
     ) -> tuple[TaskRecord, RunRecord]:
-        payload_hash = request_hash({"type": "stop", "game_id": game_id})
+        payload_hash = request_hash({"type": "stop", "game_id": game_id, "backup": backup})
         existing = self._idempotent(session, idempotency_key, payload_hash)
         if existing is not None:
             run = session.get(RunRecord, existing.run_id)
@@ -279,6 +280,7 @@ class TaskService:
             map_id=game.map_id,
             game_id=game.game_id,
             requested_port=run.port,
+            backup_requested=backup,
             run_id=run.run_id,
         )
         session.add(task)

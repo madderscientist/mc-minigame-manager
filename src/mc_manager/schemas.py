@@ -94,6 +94,7 @@ class StopRequest(ApiModel):
     model_config = ConfigDict(extra="forbid")
 
     game_id: int = Field(gt=0)
+    backup: bool = True
 
 
 class LoadRequest(ApiModel):

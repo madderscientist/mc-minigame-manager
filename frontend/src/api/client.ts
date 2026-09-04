@@ -188,8 +188,8 @@ export const api = {
     const body = { game_id: gameId, port: port || null }
     return command<TaskAccepted>('/api/start', body, `start:${gameId}`)
   },
-  stop: (gameId: number) =>
-    command<TaskAccepted>('/api/stop', { game_id: gameId }, `stop:${gameId}`),
+  stop: (gameId: number, backup = true) =>
+    command<TaskAccepted>('/api/stop', { game_id: gameId, backup }, `stop:${gameId}:${backup}`),
   load: (gameId: number, backupId: string) =>
     command<TaskAccepted>('/api/load', { game_id: gameId, backup_id: backupId }, `load:${gameId}`),
   deleteBackup: (gameId: number, backupId: string) =>

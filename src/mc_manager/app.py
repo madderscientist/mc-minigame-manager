@@ -7,11 +7,11 @@ import os
 import secrets
 import shutil
 import uuid
-from collections.abc import Generator
+from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager, suppress
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any, BinaryIO
+from typing import Annotated, Any, BinaryIO, TypeAlias, cast
 
 import uvicorn
 from anyio import to_thread
@@ -77,6 +77,15 @@ logger = logging.getLogger(__name__)
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
 
 
+def get_session(request: Request) -> Generator[Session, None, None]:
+    database = cast(Database, request.app.state.database)
+    yield from database.session_dependency()
+
+
+SessionDependency: TypeAlias = Annotated[Session, Depends(get_session)]
+IdempotencyKey: TypeAlias = Annotated[str | None, Header(alias="Idempotency-Key")]
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved_settings = settings or get_settings()
     database = Database(resolved_settings)
@@ -96,7 +105,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> Any:
+    async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         for path in (
             resolved_settings.map_root,
             resolved_settings.upload_root,
@@ -145,12 +154,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if not secrets.compare_digest(supplied, expected):
                 return _error_response(401, "unauthorized", "缺少或无效的 Bearer token")
         return await call_next(request)
-
-    def get_session() -> Generator[Session, None, None]:
-        yield from database.session_dependency()
-
-    SessionDependency = Annotated[Session, Depends(get_session)]
-    IdempotencyKey = Annotated[str | None, Header(alias="Idempotency-Key")]
 
     @app.exception_handler(ManagerError)
     async def manager_error_handler(_request: Request, error: ManagerError) -> JSONResponse:
@@ -362,16 +365,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "upload_metadata_too_large", "上传元数据不能超过 64 KiB"
                 )
         try:
-            payload: Any = json.loads(raw_metadata)
+            payload = cast(object, json.loads(raw_metadata))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ValidationError(
                 "upload_metadata_invalid", "上传元数据不是有效 JSON"
             ) from error
-        if not isinstance(payload, dict) or not all(
-            isinstance(key, str) for key in payload
-        ):
+        if not isinstance(payload, dict):
             raise ValidationError("upload_metadata_invalid", "上传元数据格式无效")
-        metadata: dict[str, object] = dict(payload)
+        raw_payload = cast(dict[object, object], payload)
+        if not all(isinstance(key, str) for key in raw_payload):
+            raise ValidationError("upload_metadata_invalid", "上传元数据格式无效")
+        metadata = cast(dict[str, object], raw_payload)
         chunk_size, completed = await to_thread.run_sync(
             chunked_uploads.create, upload_id, metadata
         )
@@ -690,6 +694,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         task, run = tasks.create_stop(
             session,
             game_id=request.game_id,
+            backup=request.backup,
             idempotency_key=idempotency_key,
         )
         return StopAccepted(task_id=task.task_id, game_id=run.game_id, status=task.status)
@@ -847,7 +852,7 @@ def _game_view(game: GameRecord, run: RunRecord | None, settings: Settings) -> G
         runtime_state=runtime_state,
         port=port,
         public_address=public_address,
-        backups=game.retained_backups,
+        backups=[BackupView.model_validate(backup) for backup in game.retained_backups],
     )
 
 
@@ -935,7 +940,7 @@ def _map_import_hash(
     fields: dict[str, str],
     java_major: int,
 ) -> str:
-    payload = {
+    payload: dict[str, object] = {
         "map": map_digest,
         "resource_pack": resource_pack_digest,
         "resource_pack_required": resource_pack_required,

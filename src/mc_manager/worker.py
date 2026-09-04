@@ -301,16 +301,18 @@ class Worker:
             task = self._get_task(session, task_id)
             run = self._get_run(session, task)
             game = self._get_game(session, task)
-            run.observed_state = ObservedState.BACKING_UP
-            task.step = "backing_up"
-            task.progress = 0.6
-            session.commit()
-            backup = self.backups.create(
-                session,
-                game,
-                reason="normal_stop" if clean else "crash_snapshot",
-                clean_shutdown=clean,
-            )
+            backup = None
+            if task.backup_requested:
+                run.observed_state = ObservedState.BACKING_UP
+                task.step = "backing_up"
+                task.progress = 0.6
+                session.commit()
+                backup = self.backups.create(
+                    session,
+                    game,
+                    reason="normal_stop" if clean else "crash_snapshot",
+                    clean_shutdown=clean,
+                )
             self.ports.release(session, run.run_id, run.generation)
             run.observed_state = ObservedState.STOPPED
             run.stopped_at = datetime.now(UTC)
@@ -319,12 +321,13 @@ class Worker:
                 task,
                 {
                     "game_id": game.game_id,
-                    "backup_id": backup.backup_id,
+                    "backup_id": backup.backup_id if backup is not None else None,
                     "clean_shutdown": clean,
                 },
             )
             session.commit()
-        self._collect_backup_garbage()
+        if backup is not None:
+            self._collect_backup_garbage()
 
     def _process_load(self, task_id: str) -> None:
         with self.database.session_factory() as session:
