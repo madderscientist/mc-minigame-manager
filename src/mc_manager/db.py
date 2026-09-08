@@ -1,7 +1,7 @@
 from collections.abc import Generator
 from pathlib import Path
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, delete, event
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
@@ -51,6 +51,15 @@ class Database:
 
     def ensure_port_pool(self) -> None:
         with self.session_factory.begin() as session:
+            session.execute(
+                delete(PortLease).where(
+                    PortLease.state == PortState.FREE,
+                    ~PortLease.port.between(
+                        self.settings.port_min,
+                        self.settings.port_max,
+                    ),
+                )
+            )
             ports = [
                 {"port": port, "state": PortState.FREE}
                 for port in range(self.settings.port_min, self.settings.port_max + 1)

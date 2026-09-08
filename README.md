@@ -1,6 +1,6 @@
 # Minecraft 小游戏管理后端
 
-运行于 Windows WSL2 的 Minecraft 小游戏控制平面，使用 Python、FastAPI、SQLite WAL、rootless Podman、systemd 和全局 frpc。
+运行于 Windows WSL2 的 Minecraft 小游戏控制平面，使用 Python、FastAPI、SQLite WAL、rootless Podman、systemd 和多实例 frpc。
 
 ![](./READMEsrc/screenshot1.jpg)
 ![](./READMEsrc/screenshot2.jpg)
@@ -27,7 +27,8 @@ mc-minigame-manager/
 ├── config/                      # 当前机器的实际配置入口
 │   ├── README.md                # 配置初始化、部署和迁移说明
 │   ├── mc-manager.env           # 实际后端配置（生成后被 Git 忽略）
-│   └── frpc.toml                # 实际 frpc 配置及 auth.token（被 Git 忽略）
+│   ├── frpc.toml                # 前端地址对应的主 frpc 配置（被 Git 忽略）
+│   └── frpc-*.toml              # 可选的额外 frpc 配置，每个运行独立进程
 ├── deploy/                      # 生产部署模板
 │   ├── containers/              # rootless Podman/容器源配置
 │   ├── frp/                     # 可提交的 frpc.toml.example
@@ -88,12 +89,15 @@ bash scripts/init-config.sh
 然后直接用 VS Code 编辑：
 
 - `config/mc-manager.env`
-- `config/frpc.toml`
+- `config/frpc.toml`（必须保留的主配置）；
+- 可选的额外 `config/frpc*.toml`。
 
-frps Token 直接写入 `config/frpc.toml` 的 `auth.token`。该文件与后端环境文件均为 `0600`，
-不会被 Git 提交。
+所有以 `frpc` 开头、以 `.toml` 结尾的直属文件都会被发现、校验并各自运行一个 frpc
+进程。frps Token 直接写入各配置的 `auth.token`；这些文件与后端环境文件均为 `0600`，
+不会被 Git 提交。前端显示的游戏连接地址只以主配置 `frpc.toml` 为准，额外配置适合连接
+其它域名或承载其它代理。
 
-运行 `sudo bash scripts/install-wsl.sh` 时，这两个文件会以受限权限部署到
+运行 `sudo bash scripts/install-wsl.sh` 时，这些文件会以受限权限部署到
 `/opt/mc-manager/config/`，systemd 直接读取部署副本。后续修改仍在项目 `config/` 中进行，
 改完重新运行安装脚本同步，无需 `sudoedit`。不直接让 systemd 读取用户 Home 下的项目文件，
 因为服务启用了 `ProtectHome=true`，且生产服务不应信任普通用户可随时改写的密钥文件。

@@ -25,6 +25,12 @@ DEPLOYED_CONFIG_DIR="$INSTALL_DIR/config"
 FRP_VERSION=0.68.0
 FRP_ARCHIVE_SHA256=3cf934477f4fb1ee9e19e49c31fb33f5ffe3283300076f59afad8b8ccf1e1621
 
+frpc_instance_unit() {
+  local config_name=$1
+  local instance=${config_name%.toml}
+  systemd-escape --template=frpc@.service "$instance"
+}
+
 frontend_source_fingerprint=$(
   cd "$SOURCE_DIR/frontend"
   find \
@@ -143,14 +149,32 @@ PY
 }
 inline_legacy_frpc_token "$LOCAL_CONFIG_DIR/frpc.toml"
 
+frpc_config_files=()
+while IFS= read -r -d '' config_file; do
+  frpc_config_files+=("$config_file")
+done < <(
+  find "$LOCAL_CONFIG_DIR" -maxdepth 1 -type f -name 'frpc*.toml' -print0 |
+    sort -z
+)
+if (( ${#frpc_config_files[@]} == 0 )) || \
+  [[ ! -f "$LOCAL_CONFIG_DIR/frpc.toml" ]]; then
+  echo "config/frpc.toml 必须存在，并作为前端展示所对应的主 frpc 配置。" >&2
+  exit 1
+fi
+
+declare -A desired_frpc_config_names=()
+for config_file in "${frpc_config_files[@]}"; do
+  desired_frpc_config_names["$(basename "$config_file")"]=1
+done
+
 config_owner_uid=${SUDO_UID:-$(stat -c '%u' "$SOURCE_DIR")}
 config_owner_gid=${SUDO_GID:-$(stat -c '%g' "$SOURCE_DIR")}
 chown "$config_owner_uid:$config_owner_gid" "$LOCAL_CONFIG_DIR" \
   "$LOCAL_CONFIG_DIR/mc-manager.env" \
-  "$LOCAL_CONFIG_DIR/frpc.toml"
+  "${frpc_config_files[@]}"
 chmod 0600 \
   "$LOCAL_CONFIG_DIR/mc-manager.env" \
-  "$LOCAL_CONFIG_DIR/frpc.toml"
+  "${frpc_config_files[@]}"
 
 ensure_subid_range() {
   local file=$1
@@ -193,6 +217,11 @@ install_frpc() {
   rm -rf "$temporary"
 }
 install_frpc
+
+echo "校验 ${#frpc_config_files[@]} 个 frpc 配置。"
+for config_file in "${frpc_config_files[@]}"; do
+  /usr/local/bin/frpc verify -c "$config_file"
+done
 
 install -d -o root -g root -m 0755 "$INSTALL_DIR"
 rm -rf "$INSTALL_DIR/tmp" "$INSTALL_DIR/credentials" "$INSTALL_DIR/secrets"
@@ -274,11 +303,23 @@ if [[ $api_token_count -ne 1 ]] || [[ ${#api_token} -lt 32 ]] || \
   exit 1
 fi
 
+deployed_frpc_config_files=()
+if [[ -d "$DEPLOYED_CONFIG_DIR" ]]; then
+  while IFS= read -r -d '' config_file; do
+    deployed_frpc_config_files+=("$config_file")
+  done < <(
+    find "$DEPLOYED_CONFIG_DIR" -maxdepth 1 -type f -name 'frpc*.toml' -print0 |
+      sort -z
+  )
+fi
+
 install -d -o root -g root -m 0755 "$DEPLOYED_CONFIG_DIR"
 install -o root -g mcmanager -m 0640 \
   "$LOCAL_CONFIG_DIR/mc-manager.env" "$DEPLOYED_CONFIG_DIR/mc-manager.env"
-install -o root -g frp -m 0640 \
-  "$LOCAL_CONFIG_DIR/frpc.toml" "$DEPLOYED_CONFIG_DIR/frpc.toml"
+for config_file in "${frpc_config_files[@]}"; do
+  install -o root -g frp -m 0640 \
+    "$config_file" "$DEPLOYED_CONFIG_DIR/$(basename "$config_file")"
+done
 rm -f "$DEPLOYED_CONFIG_DIR/frpc.token"
 
 # 旧路径仅作为兼容入口，真实运行配置统一位于 /opt/mc-manager/config。
@@ -313,12 +354,40 @@ install -o root -g root -m 0644 "$INSTALL_DIR"/deploy/systemd/*.service /etc/sys
 install -o root -g root -m 0644 "$INSTALL_DIR/deploy/systemd/mc-manager.target" /etc/systemd/system/
 systemctl daemon-reload
 
+# 每个额外的 frpc*.toml 使用一个模板实例。先停止并禁用已删除配置的
+# 旧实例，再删除部署副本，避免孤立进程继续使用已废弃的隧道。
+for config_file in "${deployed_frpc_config_files[@]}"; do
+  config_name=$(basename "$config_file")
+  if [[ -z ${desired_frpc_config_names[$config_name]+x} ]]; then
+    if [[ $config_name != frpc.toml ]]; then
+      obsolete_unit=$(frpc_instance_unit "$config_name")
+      systemctl disable --now "$obsolete_unit" || true
+    fi
+    rm -f "$config_file"
+    echo "已移除不再存在的 frpc 配置: $config_name"
+  fi
+done
+
+frpc_instance_units=()
+for config_file in "${frpc_config_files[@]}"; do
+  config_name=$(basename "$config_file")
+  if [[ $config_name == frpc.toml ]]; then
+    continue
+  fi
+  instance_unit=$(frpc_instance_unit "$config_name")
+  frpc_instance_units+=("$instance_unit")
+  systemctl enable "$instance_unit"
+done
+
 echo "安装完成。唯一配置源是: $LOCAL_CONFIG_DIR"
+echo "已部署 ${#frpc_config_files[@]} 个 frpc 配置；每个配置对应一个独立进程。"
 echo "直接用 VS Code 编辑该目录；修改后重新运行本脚本部署配置。"
 if systemctl is-enabled --quiet mc-manager.target; then
   echo "mc-manager.target 已启用，执行数据库迁移并重启生产服务。"
   systemctl restart mc-manager-migrate.service
-  systemctl restart mc-manager-api.service mc-manager-worker.service frpc.service
+  systemctl restart \
+    mc-manager-api.service mc-manager-worker.service frpc.service \
+    "${frpc_instance_units[@]}"
 else
   echo "配置完成后执行: systemctl enable --now mc-manager.target"
 fi

@@ -2,10 +2,11 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, select, text
 
 from mc_manager.config import Settings, get_settings
 from mc_manager.db import Database
+from mc_manager.models import PortLease
 
 
 def test_initial_migration_creates_control_plane_schema(
@@ -144,6 +145,38 @@ def test_database_initialize_preserves_absolute_sqlite_path(tmp_path: Path) -> N
     )
     Database(settings).initialize()
     assert database_path.is_file()
+
+
+def test_database_initialize_removes_free_ports_outside_configured_pool(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "manager.db"
+    storage = tmp_path / "storage"
+    wide_database = Database(
+        Settings(
+            database_url=f"sqlite:///{database_path}",
+            storage_root=storage,
+            port_min=32000,
+            port_max=32099,
+        )
+    )
+    wide_database.initialize()
+    wide_database.engine.dispose()
+
+    narrow_database = Database(
+        Settings(
+            database_url=f"sqlite:///{database_path}",
+            storage_root=storage,
+            port_min=32000,
+            port_max=32002,
+        )
+    )
+    narrow_database.initialize()
+    with narrow_database.session_factory() as session:
+        ports = list(session.scalars(select(PortLease.port).order_by(PortLease.port)))
+    narrow_database.engine.dispose()
+
+    assert ports == [32000, 32001, 32002]
 
 
 def test_v5_migration_recovers_stale_alembic_batch_tables(

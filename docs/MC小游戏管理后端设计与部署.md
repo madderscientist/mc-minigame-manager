@@ -9,7 +9,7 @@
 - 单 Worker 执行地图复制、Paper 下载、Podman 启停和备份；
 - SQLite WAL 保存资源、任务、端口租约和状态机；
 - 每次运行使用一个 rootless Podman 容器；
-- 一个全局 frpc 静态注册全部端口池；
+- 一个主 frpc 静态注册游戏端口池，可按域名增加独立 frpc 进程；
 - systemd 管理 API、Worker 和 frpc；
 - 数据全部位于 WSL ext4，不放在 `/mnt/c`。
 
@@ -23,7 +23,7 @@ flowchart TD
     Worker --> Backups[Game 内部备份]
     Worker --> Podman[rootless Podman]
     Podman --> Paper[Paper Run]
-    FRPC[全局 frpc] --> FRPS[公网 frps]
+    FRPC[主与额外 frpc 进程] --> FRPS[一个或多个公网 frps]
 ```
 
 ## 2. 领域模型
@@ -406,7 +406,8 @@ Podman 容器使用：
 
 ## 9. frpc
 
-frpc 0.68.0 作为单个 systemd 服务运行，并静态注册整个端口池：
+frpc 0.68.0 由 systemd 管理。主配置 `config/frpc.toml` 对应 `frpc.service`，静态注册整个
+游戏端口池：
 
 ```text
 frps:30000 → frpc → WSL 127.0.0.1:30000 → Paper:25565
@@ -419,6 +420,11 @@ frps:30000 → frpc → WSL 127.0.0.1:30000 → Paper:25565
 frpc 模板保存在 `deploy/frp/frpc.toml.example`。执行 `scripts/init-config.sh` 后，在项目
 `config/frpc.toml` 中填写真实参数和 `auth.token`，再由安装脚本部署后启用。
 
+`config/` 目录直属的所有 `frpc*.toml` 都是 frpc 配置。额外文件（例如
+`frpc-resources.toml`）各自对应一个 `frpc@.service` 实例，可连接不同域名或 frps；安装脚本
+负责发现、逐个校验、部署、启停和清理。前端地址计算只对应必须存在的 `frpc.toml`，不会被
+额外配置改变。多个进程启用内置 Web 管理界面时必须使用不同的 `webServer.port`。
+
 ### 玩家资源包公网下载
 
 Paper 只把 `server.properties` 中的 URL 和 SHA-1 发送给玩家，不会把 WSL 本地 ZIP 直接
@@ -428,7 +434,7 @@ Paper 只把 `server.properties` 中的 URL 和 SHA-1 发送给玩家，不会�
 MC_RESOURCE_PACK_BASE_URL=https://packs.example.com
 ```
 
-该 URL 必须从玩家网络可访问，不能是 `127.0.0.1`。可在全局 frpc 中额外把本机 8080
+该 URL 必须从玩家网络可访问，不能是 `127.0.0.1`。可在主配置或独立 frpc 配置中把本机 8080
 映射到 frps 的独立 HTTP 端口，再由公网已有的 HTTPS 反向代理仅将 `/resource-packs/`
 转发到该端口；示例已注释在 `deploy/frp/frpc.toml.example`。修改后重新运行安装脚本同步
 配置并重启 API，然后重新导入带资源包的 Map。已经导入的 Map 是不可变的，不会改写旧 URL。
@@ -443,7 +449,7 @@ FRP、防火墙或反向代理，而不是关闭 SHA-1 校验。下载端点匿�
 
 ```bash
 bash scripts/init-config.sh
-# 直接编辑项目 config/mc-manager.env 和 config/frpc.toml
+# 直接编辑项目 config/mc-manager.env、config/frpc.toml 和可选的 frpc*.toml
 bash scripts/build-frontend.sh
 sudo bash scripts/install-wsl.sh
 ```
@@ -456,7 +462,7 @@ sudo bash scripts/install-wsl.sh
 配置：
 
 - 示例：`.env.example`、`deploy/frp/frpc.toml.example`
-- 实际唯一来源：`config/mc-manager.env`、`config/frpc.toml`
+- 实际唯一来源：`config/mc-manager.env`、主 `config/frpc.toml` 和可选 `config/frpc*.toml`
 - systemd 读取的部署副本：`/opt/mc-manager/config/`
 
 实际配置直接在项目中编辑，无需 `sudoedit`。修改后重新运行安装脚本同步受保护副本。
@@ -464,7 +470,7 @@ sudo bash scripts/install-wsl.sh
 服务不应直接信任普通用户可随时改写的密钥文件。
 
 首次安装尚未启用 `mc-manager.target` 时，安装脚本只部署文件和单元；target 已启用的升级
-安装会自动执行 Alembic 迁移，并重启 API、Worker 和 frpc 以加载新代码与配置。因此不要
+安装会自动执行 Alembic 迁移，并重启 API、Worker 和全部 frpc 进程以加载新代码与配置。因此不要
 只重复执行 `systemctl enable --now`：已经运行的服务不会因为 enable 操作自动重启。
 
 启用 API 与 Worker：
@@ -496,7 +502,7 @@ Windows 还需使用任务计划程序在无人登录的冷启动时唤醒指定
 提供 `/assets/*`、SPA 页面和 `/api/*`。前端所有请求使用相对 URL，因此无需 CORS。
 
 管理台的 `/help` 内置保姆级教程，覆盖 Ubuntu/WSL 首次安装、systemd、后端环境变量、
-全局 frpc、Map→Game→启动→停止→恢复的完整流程、地图压缩包要求和常见故障命令。
+多实例 frpc、Map→Game→启动→停止→恢复的完整流程、地图压缩包要求和常见故障命令。
 地图上传窗口也会直接展示结构、安全和容量检查清单，避免管理员必须先查外部文档。
 
 一级页面只有概览、游戏、地图和任务：

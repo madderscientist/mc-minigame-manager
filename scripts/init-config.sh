@@ -26,6 +26,8 @@ else
 fi
 
 chmod 0600 "$ENV_FILE" "$FRPC_FILE"
-echo "请直接用 VS Code 编辑 config/ 中的两个文件。"
+find "$CONFIG_DIR" -maxdepth 1 -type f -name 'frpc*.toml' -exec chmod 0600 {} +
+echo "请直接用 VS Code 编辑 config/；可增加任意以 frpc 开头、以 .toml 结尾的配置文件。"
+echo "每个 frpc*.toml 会运行一个独立进程，前端连接地址始终以 frpc.toml 为准。"
 echo "然后运行: bash scripts/build-frontend.sh"
 echo "最后运行: sudo bash scripts/install-wsl.sh"

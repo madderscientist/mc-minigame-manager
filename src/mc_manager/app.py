@@ -866,6 +866,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lease_rows = session.execute(
             select(PortLease, RunRecord.game_id)
             .outerjoin(RunRecord, PortLease.run_id == RunRecord.run_id)
+            .where(
+                PortLease.port >= resolved_settings.port_min,
+                PortLease.port <= resolved_settings.port_max,
+            )
             .order_by(PortLease.port)
         ).all()
         return StatusView(

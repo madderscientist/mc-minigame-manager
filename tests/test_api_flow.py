@@ -15,8 +15,8 @@ from starlette.datastructures import FormData, State
 
 from mc_manager.app import _map_import_hash, create_app
 from mc_manager.config import Settings
-from mc_manager.enums import DesiredState, ObservedState, ResourceState
-from mc_manager.models import MapRecord, RunRecord
+from mc_manager.enums import DesiredState, ObservedState, PortState, ResourceState
+from mc_manager.models import MapRecord, PortLease, RunRecord
 from mc_manager.runtime.fake import FakeRuntime
 from mc_manager.services.maps import MapService
 from mc_manager.worker import Worker
@@ -48,6 +48,22 @@ def run_task(client: TestClient, worker: Worker, task_id: str) -> dict:
     response = client.get(f"/api/tasks/{task_id}")
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def test_status_only_returns_configured_port_pool(app_client) -> None:
+    client, _, _ = app_client
+    database = app_state(client).database
+    with database.session_factory.begin() as session:
+        session.add_all(
+            [
+                PortLease(port=30999, state=PortState.FREE),
+                PortLease(port=31003, state=PortState.FREE),
+            ]
+        )
+
+    ports = client.get("/api/status").json()["ports"]
+
+    assert [port["port"] for port in ports] == [31000, 31001, 31002]
 
 
 def create_ready_game(

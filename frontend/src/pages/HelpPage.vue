@@ -80,20 +80,22 @@ sudo systemctl restart mc-manager-api mc-manager-worker</code><button @click="co
         </section>
 
         <section id="frp" class="guide-section panel">
-          <div class="guide-heading"><span>03</span><div><div class="eyebrow">Public access</div><h2>配置全局 frpc</h2></div></div>
+          <div class="guide-heading"><span>03</span><div><div class="eyebrow">Public access</div><h2>配置多实例 frpc</h2></div></div>
           <p>如果只在本机测试，可以暂时不启动 frpc。需要公网连接 Minecraft 时再完成这一步。</p>
           <ol class="compact-steps">
             <li><b>准备公网 frps</b><span>确认服务器地址、服务端口、Token，以及允许映射的远端端口范围。</span></li>
-            <li><b>编辑客户端配置</b><span>修改项目 <code>config/frpc.toml</code> 中的 <code>serverAddr</code>、<code>serverPort</code> 和端口范围。</span></li>
+            <li><b>编辑主配置</b><span>修改项目 <code>config/frpc.toml</code> 中的 <code>serverAddr</code>、<code>serverPort</code> 和端口范围。前端显示的游戏连接地址始终以此文件为准。</span></li>
             <li><b>填写 Token</b><span>将与 frps 一致的 Token 写入项目 <code>config/frpc.toml</code> 的 <code>auth.token</code>；实际配置被 Git 忽略。</span></li>
+            <li><b>按域名增加配置</b><span>可增加 <code>config/frpc-resources.toml</code> 等任意直属的 <code>frpc*.toml</code>。每个文件会启动一个独立进程，且不会改变前端地址。</span></li>
             <li><b>校验并启动</b><span>配置校验通过后再启用 systemd 服务。</span></li>
             <li><b>暴露资源包下载</b><span>地图带玩家资源包时，另将本机 8080 映射到公网 HTTP 端口，最好由公网已有的 HTTPS 反向代理只转发 <code>/resource-packs/</code>。</span></li>
           </ol>
           <div class="command multiline"><code>sudo bash scripts/install-wsl.sh
 sudo -u frp frpc verify -c /opt/mc-manager/config/frpc.toml
-sudo systemctl enable --now frpc
-systemctl status frpc</code><button @click="copy('sudo bash scripts/install-wsl.sh\nsudo -u frp frpc verify -c /opt/mc-manager/config/frpc.toml\nsudo systemctl enable --now frpc\nsystemctl status frpc')">复制</button></div>
+sudo systemctl enable --now mc-manager.target
+systemctl --no-pager --full status 'frpc*'</code><button @click="copy(&quot;sudo bash scripts/install-wsl.sh\nsudo -u frp frpc verify -c /opt/mc-manager/config/frpc.toml\nsudo systemctl enable --now mc-manager.target\nsystemctl --no-pager --full status 'frpc*'&quot;)">复制</button></div>
           <div class="guide-callout warning"><strong>端口必须一致</strong><p>后端端口池、frpc 本地端口和 frps 远端允许端口必须对应。玩家连接地址是 <code>frps公网地址:分配端口</code>。</p></div>
+          <div class="guide-callout"><strong>每个进程的管理端口必须不同</strong><p>额外配置若启用 <code>webServer.port</code>，不能与其它 frpc 配置重复。删除额外配置后重新运行安装脚本，会停止并清理对应进程。</p></div>
           <div class="guide-callout"><strong>Paper 不直接托管本地 ZIP</strong><p>系统会把公开下载 URL、SHA-1 和接受策略写入 <code>server.properties</code>，Paper 负责在进服时通知客户端。资源包文件由本系统的匿名 <code>/resource-packs/</code> 路由下载，因此 <code>MC_RESOURCE_PACK_BASE_URL</code> 不能填写 <code>127.0.0.1</code>，也不能要求管理 Token。</p></div>
         </section>
 
@@ -122,11 +124,11 @@ systemctl status frpc</code><button @click="copy('sudo bash scripts/install-wsl.
             <details><summary>Token 一直提示无效</summary><p>确认复制时没有带上 <code>MC_API_TOKEN=</code> 前缀、空格或换行。Token 区分大小写。</p></details>
             <details><summary>Game 一直停留在任务中</summary><p>查看“任务”页错误，再运行 <code>journalctl -u mc-manager-worker -n 100 --no-pager</code>。不要直接修改数据库。</p></details>
             <details><summary>Paper 启动失败</summary><p>重点核对 Minecraft 版本、精确 Paper build、Java 主版本和插件兼容性。旧版本可能需要管理员提供受信任的 Paper URL 与 SHA-256。</p></details>
-            <details><summary>玩家无法从公网连接</summary><p>确认 Game 已“运行中”，frpc 为 active，frps 防火墙和云安全组已开放分配端口，并检查 frps 的 allowPorts。</p></details>
+            <details><summary>玩家无法从公网连接</summary><p>确认 Game 已“运行中”，主配置对应的 <code>frpc.service</code> 为 active，frps 防火墙和云安全组已开放分配端口，并检查 frps 的 allowPorts。</p></details>
             <details><summary>玩家资源包下载失败</summary><p>在 Map 详情点击“测试下载”，并从玩家所在网络访问同一 URL。确认公网 HTTPS/FRP 转发正常、<code>MC_RESOURCE_PACK_BASE_URL</code> 没有写成本机地址，修改地址后需重新导入 Map。</p></details>
             <details><summary>磁盘空间不足</summary><p>检查 <code>/srv/mc-manager</code> 和 Podman 存储。先停止新上传，不要手工删除正在使用的 Game 或 Backup 目录。</p></details>
           </div>
-          <div class="command multiline"><code>systemctl status mc-manager-api mc-manager-worker frpc\njournalctl -u mc-manager-api -n 100 --no-pager\njournalctl -u mc-manager-worker -n 100 --no-pager</code><button @click="copy('systemctl status mc-manager-api mc-manager-worker frpc\njournalctl -u mc-manager-api -n 100 --no-pager\njournalctl -u mc-manager-worker -n 100 --no-pager')">复制</button></div>
+          <div class="command multiline"><code>systemctl status mc-manager-api mc-manager-worker 'frpc*'\njournalctl -u mc-manager-api -n 100 --no-pager\njournalctl -u mc-manager-worker -n 100 --no-pager</code><button @click="copy(&quot;systemctl status mc-manager-api mc-manager-worker 'frpc*'\njournalctl -u mc-manager-api -n 100 --no-pager\njournalctl -u mc-manager-worker -n 100 --no-pager&quot;)">复制</button></div>
           <div class="guide-callout danger"><strong>不要直接暴露到公网 HTTP</strong><p>当前 Token 会随 HTTP 请求发送。没有 HTTPS 时只在本机或可信网络使用；远程管理优先使用 SSH 隧道。</p></div>
         </section>
       </div>
