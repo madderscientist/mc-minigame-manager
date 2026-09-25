@@ -16,7 +16,7 @@ from typing import Annotated, Any, BinaryIO, TypeAlias, cast
 
 import uvicorn
 from anyio import to_thread
-from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -43,6 +43,7 @@ from mc_manager.schemas import (
     CreateGameAccepted,
     CreateGameRequest,
     DeleteGameAccepted,
+    GameLogsView,
     GameView,
     GenerateMapRequest,
     LoadAccepted,
@@ -62,6 +63,7 @@ from mc_manager.schemas import (
 )
 from mc_manager.services.archive import SafeZipExtractor
 from mc_manager.services.artifacts import latest_stable_paper_build, supported_paper_versions
+from mc_manager.services.game_logs import read_game_logs
 from mc_manager.services.maps import (
     RESOURCE_PACK_STORAGE_NAME,
     SAFE_RESOURCE_NAME,
@@ -728,6 +730,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             .order_by(RunRecord.created_at.desc(), RunRecord.run_id.desc())
         )
         return _game_view(game, run, resolved_settings)
+
+    @app.get("/api/games/{game_id}/logs", response_model=GameLogsView)
+    def get_game_logs(
+        game_id: int,
+        session: SessionDependency,
+        response: Response,
+        tail: Annotated[int, Query(ge=1, le=1000)] = 500,
+    ) -> GameLogsView:
+        game = session.get(GameRecord, game_id)
+        if game is None:
+            raise NotFoundError("game_not_found", "游戏不存在")
+        snapshot = read_game_logs(storage.root, game.relative_path, tail)
+        response.headers["Cache-Control"] = "no-store"
+        return GameLogsView(
+            game_id=game_id,
+            lines=snapshot.lines,
+            available=snapshot.available,
+            truncated=snapshot.truncated,
+        )
 
     @app.delete(
         "/api/games/{game_id}",

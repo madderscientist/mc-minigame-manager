@@ -154,6 +154,13 @@ class GameView(ApiModel):
     server_settings: ServerSettings
 
 
+class GameLogsView(ApiModel):
+    game_id: int
+    lines: list[str]
+    available: bool
+    truncated: bool
+
+
 class CreateGameRequest(ApiModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 

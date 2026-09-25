@@ -399,7 +399,7 @@ class ChunkedUploadStore:
     def _write_text(path: Path, content: str) -> None:
         temporary = path.with_name(f".{path.name}-{uuid.uuid4().hex}.tmp")
         try:
-            temporary.write_text(content, encoding="ascii")
+            temporary.write_text(content, encoding="utf-8")
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)

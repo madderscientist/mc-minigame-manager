@@ -2,6 +2,7 @@ import type {
   ApiErrorBody,
   ChunkedUploadCreated,
   Game,
+  GameLogs,
   GenerateMapInput,
   MapRecord,
   MapUploadInput,
@@ -181,6 +182,8 @@ export const api = {
   deleteMap: (mapId: number) => request<void>(`/api/maps/${mapId}`, { method: 'DELETE' }),
   games: () => request<Game[]>('/api/games'),
   game: (gameId: number) => request<Game>(`/api/games/${gameId}`),
+  gameLogs: (gameId: number, tail = 500) =>
+    request<GameLogs>(`/api/games/${gameId}/logs?tail=${tail}`, { cache: 'no-store' }),
   createGame: (mapId: number, name?: string, serverSettings?: ServerSettings) => {
     const body = {
       map_id: mapId,

@@ -135,6 +135,16 @@ MC_RESOURCE_PACK_BASE_URL=https://packs.example.com
 种子、世界类型和结构生成仅适用于自然生成模板。端口、世界目录、命令权限和资源包字段由
 系统托管，不能通过自定义键覆盖。当前不编辑 Paper/Bukkit/Spigot YAML。
 
+游戏详情的“游戏日志”页签显示持久目录中 `logs/latest.log` 的末尾内容，默认每 3 秒刷新，
+支持暂停刷新、手动刷新和跟随最新内容；离开页签后停止轮询。停止游戏后仍可查看保留日志，
+尚未生成日志时显示空状态。此处是 Minecraft 服务端日志，不包含 JVM/Paper 写入日志前的
+容器启动错误，也不提供历史压缩日志。API 用户需拥有游戏日志的读取权限。安装脚本将
+游戏根目录设为 Worker 所有、共享组 `mcmanager` 可读和可遍历的 `2750`；API 的 systemd
+沙箱仍保持游戏目录只读。旧部署若提示日志读取失败，需重新运行安装脚本更新目录权限，
+仅重启 API 不会修复权限。手工导入的游戏还需保证子目录可供共享组遍历、日志文件可读。
+接口 `GET /api/games/{game_id}/logs?tail=500` 使用现有管理鉴权，`tail` 范围为 1–1000，
+每次最多读取末尾 256 KiB；返回 `lines`、`available` 和 `truncated`，不跟随符号链接。
+
 质量检查：
 ```bash
 .venv/bin/pytest

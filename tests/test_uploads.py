@@ -51,6 +51,15 @@ def test_chunk_upload_is_idempotent_and_result_can_be_retried(tmp_path: Path) ->
     assert (store.directory(upload_id) / "result.json").is_file()
 
 
+def test_chunk_upload_accepts_unicode_metadata(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    upload_id = "195a5a09-b0f7-4e92-89db-4add05cdb5a2"
+    metadata = {"map_size": 4, "name": "中文地图"}
+
+    assert store.create(upload_id, metadata) == (4, False)
+    assert store.create(upload_id, metadata) == (4, False)
+
+
 def test_concurrent_different_writes_to_same_chunk_cannot_corrupt_marker(
     tmp_path: Path,
 ) -> None:

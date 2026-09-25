@@ -343,8 +343,11 @@ install -d -o root -g mcmanager -m 0750 /srv/mc-manager /srv/mc-manager/.staging
 install -d -o mcmanager-api -g mcmanager -m 2750 \
   /srv/mc-manager/maps /srv/mc-manager/repository /srv/mc-manager/uploads \
   /srv/mc-manager/.staging/api
+# API 需要读取游戏的 logs/latest.log。只开放共享组读取和遍历，不开放写入；
+# API 的 ProtectSystem=strict 仍将整个 games 树保持为只读。
+install -d -o mcmanager-worker -g mcmanager -m 2750 /srv/mc-manager/games
 install -d -o mcmanager-worker -g mcmanager -m 2700 \
-  /srv/mc-manager/games /srv/mc-manager/active /srv/mc-manager/backups \
+  /srv/mc-manager/active /srv/mc-manager/backups \
   /srv/mc-manager/artifacts \
   /srv/mc-manager/.staging/worker
 # Worker 只读仓库地图，用于创建持久游戏副本。

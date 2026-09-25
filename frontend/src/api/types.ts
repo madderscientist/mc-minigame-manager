@@ -82,6 +82,13 @@ export interface Game {
   server_settings: ServerSettings
 }
 
+export interface GameLogs {
+  game_id: number
+  lines: string[]
+  available: boolean
+  truncated: boolean
+}
+
 export interface Task {
   task_id: string
   type: TaskType

@@ -24,6 +24,20 @@ describe('API client', () => {
     expect(headers.get('Authorization')).toBe('Bearer session-secret')
   })
 
+  it('fetches bounded game logs with authentication and no caching', async () => {
+    tokenSession.set('session-secret')
+    const logs = { game_id: 3, lines: ['Ready'], available: true, truncated: false }
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => response(logs))
+
+    await expect(api.gameLogs(3)).resolves.toEqual(logs)
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/games/3/logs?tail=500')
+    const init = fetchMock.mock.calls[0]?.[1]
+    expect(init?.cache).toBe('no-store')
+    expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer session-secret')
+    await api.gameLogs(3, 100)
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('/api/games/3/logs?tail=100')
+  })
+
   it('clears an invalid token and dispatches an event', async () => {
     tokenSession.set('invalid')
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
