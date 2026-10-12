@@ -12,6 +12,7 @@ import type {
   Status,
   Task,
   TaskAccepted,
+  UpdateMapInput,
 } from './types'
 
 const TOKEN_KEY = 'mc-manager-token'
@@ -176,6 +177,8 @@ export const api = {
   health: () => request<{ status: string }>('/healthz'),
   maps: () => request<MapRecord[]>('/api/maps'),
   map: (mapId: number) => request<MapRecord>(`/api/maps/${mapId}`),
+  updateMap: (mapId: number, input: UpdateMapInput) =>
+    request<MapRecord>(`/api/maps/${mapId}`, { method: 'PATCH', body: JSON.stringify(input) }),
   paperVersions: () => request<PaperVersion[]>('/api/paper/versions'),
   generateMap: (input: GenerateMapInput) =>
     command<MapUploadResult>('/api/maps/generated', input, 'generate-map'),

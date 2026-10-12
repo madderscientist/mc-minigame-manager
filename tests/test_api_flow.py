@@ -133,6 +133,153 @@ def test_upload_map_persists_managed_server_settings(
     assert "server-port=25565" in properties
 
 
+def test_edit_map_settings_and_resource_pack(settings, map_zip) -> None:
+    configured = Settings.model_validate({
+        **settings.model_dump(),
+        "resource_pack_base_url": "https://packs.example.com",
+    })
+    with TestClient(create_app(configured)) as client:
+        worker = Worker(
+            configured, app_state(client).database, FakeRuntime(), worker_id="test-worker"
+        )
+        check_edit_map_settings_and_resource_pack(client, worker, configured, map_zip)
+
+
+def check_edit_map_settings_and_resource_pack(client, worker, settings, map_zip) -> None:
+    uploaded = client.post(
+        "/api/maps",
+        data={
+            "name": "Before",
+            "mc_version": "1.20.4",
+            "paper_build": "497",
+            "server_settings": json.dumps({"pvp": False, "custom": {"motd": "Old"}}),
+        },
+        files={
+            "map": ("map.zip", map_zip, "application/zip"),
+            "resource_pack": ("pack.zip", make_resource_pack_zip(), "application/zip"),
+        },
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    map_id = uploaded.json()["map_id"]
+    old_game_id = create_ready_game(client, worker, map_id)
+    old_properties = (settings.game_root / str(old_game_id) / "server.properties").read_text()
+    response = client.patch(
+        f"/api/maps/{map_id}",
+        json={
+            "name": " After ",
+            "server_settings": {"spawn_protection": 0, "custom": {}},
+            "resource_pack_required": True,
+            "resource_pack_prompt": " Please accept ",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["name"] == "After"
+    assert response.json()["resource_pack"]["required"] is True
+    assert response.json()["resource_pack"]["prompt"] == "Please accept"
+    map_path = settings.map_root / str(map_id)
+    properties = (map_path / "server.properties").read_text()
+    assert "require-resource-pack=true" in properties
+    assert "spawn-protection=0" in properties
+    assert "pvp=" not in properties
+    assert "motd=" not in properties
+    assert "Please accept" in properties
+    metadata = json.loads((map_path / ".mc-manager-resources" / "metadata.json").read_text())
+    assert metadata["required"] is True
+    assert metadata["prompt"] == "Please accept"
+    old_path = settings.game_root / str(old_game_id) / "server.properties"
+    assert old_path.read_text() == old_properties
+    new_game_id = create_ready_game(client, worker, map_id)
+    new_path = settings.game_root / str(new_game_id) / "server.properties"
+    assert "require-resource-pack=true" in new_path.read_text()
+    cleared = client.patch(f"/api/maps/{map_id}", json={"resource_pack_prompt": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["resource_pack"]["prompt"] is None
+    assert "resource-pack-prompt=" not in (map_path / "server.properties").read_text()
+    assert client.patch(f"/api/maps/{map_id}", json={"name": " "}).status_code == 422
+
+
+def test_edit_map_rejects_invalid_or_busy_updates(app_client, map_zip) -> None:
+    client, _worker, _runtime = app_client
+    response = client.post(
+        "/api/maps", data={"name": "Original", "mc_version": "1.20.4", "paper_build": "497"},
+        files={"map": ("map.zip", map_zip, "application/zip")},
+    )
+    assert response.status_code == 201
+    map_id = response.json()["map_id"]
+    for payload in (
+        {"name": " "}, {"name": None}, {"server_settings": None},
+        {"resource_pack_required": None}, {"resource_pack_prompt": "x" * 257},
+        {"server_settings": {"max_players": 0}}, {"unknown": True},
+        {"server_settings": {"custom": {"require-resource-pack": "false"}}},
+    ):
+        assert client.patch(f"/api/maps/{map_id}", json=payload).status_code == 422
+    missing_pack = client.patch(f"/api/maps/{map_id}", json={"resource_pack_required": True})
+    assert missing_pack.status_code == 422
+    assert missing_pack.json()["error"]["code"] == "resource_pack_missing"
+    assert client.patch("/api/maps/99999", json={"name": "Missing"}).status_code == 404
+    with app_state(client).database.session_factory.begin() as session:
+        record = session.get(MapRecord, map_id)
+        record.state = ResourceState.PREPARING
+    assert client.patch(f"/api/maps/{map_id}", json={"name": "Wait"}).status_code == 409
+    with app_state(client).database.session_factory.begin() as session:
+        record = session.get(MapRecord, map_id)
+        record.state = ResourceState.READY
+    assert client.post("/api/games", json={"map_id": map_id}).status_code == 202
+    busy = client.patch(f"/api/maps/{map_id}", json={"name": "Busy"})
+    assert busy.status_code == 409
+    assert busy.json()["error"]["code"] == "map_busy"
+    assert client.get(f"/api/maps/{map_id}").json()["name"] == "Original"
+
+
+def test_edit_map_name_skips_template_digest(app_client, map_zip, monkeypatch) -> None:
+    client, _worker, _runtime = app_client
+    response = client.post(
+        "/api/maps", data={"name": "Original", "mc_version": "1.20.4", "paper_build": "497"},
+        files={"map": ("map.zip", map_zip, "application/zip")},
+    )
+    assert response.status_code == 201
+    map_id = response.json()["map_id"]
+
+    def fail_digest(*_args):
+        pytest.fail("Renaming must not hash the template")
+
+    monkeypatch.setattr("mc_manager.services.maps.Storage.tree_digest", fail_digest)
+    renamed = client.patch(f"/api/maps/{map_id}", json={"name": "Renamed"})
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "Renamed"
+
+
+def test_edit_map_restores_files_when_commit_fails(app_client, settings, map_zip) -> None:
+    client, _worker, _runtime = app_client
+    response = client.post(
+        "/api/maps", data={"name": "Original", "mc_version": "1.20.4", "paper_build": "497"},
+        files={"map": ("map.zip", map_zip, "application/zip")},
+    )
+    assert response.status_code == 201
+    map_id = response.json()["map_id"]
+    path = settings.map_root / str(map_id) / "server.properties"
+    original = path.read_bytes()
+    database = app_state(client).database
+    with database.session_factory() as session:
+        digest = session.get(MapRecord, map_id).content_sha256
+
+    def fail_commit(_session):
+        raise RuntimeError("injected commit failure")
+
+    event.listen(database.session_factory, "before_commit", fail_commit)
+    try:
+        with pytest.raises(RuntimeError, match="injected commit failure"):
+            client.patch(f"/api/maps/{map_id}", json={
+                "name": "Changed", "server_settings": {"max_players": 42},
+            })
+    finally:
+        event.remove(database.session_factory, "before_commit", fail_commit)
+    assert path.read_bytes() == original
+    assert client.get(f"/api/maps/{map_id}").json()["name"] == "Original"
+    with database.session_factory() as session:
+        assert session.get(MapRecord, map_id).content_sha256 == digest
+
+
 def test_create_generated_map_template_without_world(
     app_client: tuple[TestClient, Worker, FakeRuntime],
     settings: Settings,

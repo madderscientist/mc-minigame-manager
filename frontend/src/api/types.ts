@@ -64,6 +64,13 @@ export interface MapRecord {
   server_settings: ServerSettings
 }
 
+export interface UpdateMapInput {
+  name?: string
+  server_settings?: ServerSettings
+  resource_pack_required?: boolean
+  resource_pack_prompt?: string | null
+}
+
 export interface Game {
   game_id: number
   map_id: number

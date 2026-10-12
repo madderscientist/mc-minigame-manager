@@ -17,6 +17,7 @@ from typing import Annotated, Any, BinaryIO, TypeAlias, cast
 import uvicorn
 from anyio import to_thread
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,7 +28,7 @@ from starlette.datastructures import UploadFile
 
 from mc_manager.config import Settings, get_settings
 from mc_manager.db import Database
-from mc_manager.enums import MapSourceType, ResourceState
+from mc_manager.enums import MapSourceType, ResourceState, TaskStatus
 from mc_manager.errors import ConflictError, ManagerError, NotFoundError, ValidationError
 from mc_manager.middleware import RequestSizeLimitMiddleware
 from mc_manager.models import (
@@ -59,6 +60,7 @@ from mc_manager.schemas import (
     StopAccepted,
     StopRequest,
     TaskView,
+    UpdateMapRequest,
     UploadResult,
 )
 from mc_manager.services.archive import SafeZipExtractor
@@ -179,7 +181,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             422,
             "request_validation_failed",
             "请求参数校验失败",
-            details={"errors": error.errors()},
+            details={"errors": jsonable_encoder(error.errors(), custom_encoder={ValueError: str})},
         )
 
     @app.exception_handler(OperationalError)
@@ -226,6 +228,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if record is None:
             raise NotFoundError("map_not_found", "仓库地图不存在")
         return record
+
+    @app.patch("/api/maps/{map_id}", response_model=MapView)
+    def update_map(
+        map_id: int, request: UpdateMapRequest, session: SessionDependency
+    ) -> MapRecord:
+        if database.engine.dialect.name == "sqlite":
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        record = session.get(MapRecord, map_id)
+        if record is None:
+            raise NotFoundError("map_not_found", "仓库地图不存在")
+        creating = session.scalar(
+            select(TaskRecord.task_id).where(
+                TaskRecord.map_id == map_id,
+                TaskRecord.status.in_([TaskStatus.PENDING, TaskStatus.RUNNING]),
+            ).limit(1)
+        )
+        if creating is not None:
+            raise ConflictError("map_busy", "地图正在创建游戏, 请完成后再编辑")
+        return maps.update_map(session, record, request)
 
     @app.get(
         "/resource-packs/maps/{map_id}/{sha1}/{filename}",

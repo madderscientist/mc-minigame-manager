@@ -11,8 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from mc_manager.enums import MapSourceType, ResourceState
-from mc_manager.errors import ValidationError
+from mc_manager.errors import ConflictError, ValidationError
 from mc_manager.models import MapRecord
+from mc_manager.schemas import UpdateMapRequest
 from mc_manager.services.archive import SafeZipExtractor
 from mc_manager.services.server_properties import (
     PAPER_PERMISSION_PROPERTIES,
@@ -209,6 +210,52 @@ class MapService:
             shutil.rmtree(destination, ignore_errors=True)
             raise
 
+    def update_map(
+        self, session: Session, record: MapRecord, request: UpdateMapRequest
+    ) -> MapRecord:
+        if record.state != ResourceState.READY:
+            raise ConflictError("map_not_ready", "地图尚未准备完成, 不能编辑")
+        fields = request.model_fields_set
+        pack_changed = bool(fields & {"resource_pack_required", "resource_pack_prompt"})
+        if pack_changed and record.resource_pack is None:
+            raise ValidationError("resource_pack_missing", "地图没有资源包")
+        directory = self.storage.resolve(record.relative_path)
+        properties_path = directory / "server.properties"
+        metadata_path = directory / ".mc-manager-resources" / RESOURCE_PACK_METADATA_NAME
+        paths = []
+        if request.server_settings is not None or pack_changed:
+            paths.append(properties_path)
+        if pack_changed:
+            paths.append(metadata_path)
+        originals = {path: path.read_bytes() if path.exists() else None for path in paths}
+        try:
+            if request.name is not None:
+                record.name = request.name
+            if request.server_settings is not None:
+                settings = request.server_settings.model_dump(mode="json", exclude_none=True)
+                apply_server_settings(properties_path, settings, inherited=record.server_settings)
+                record.server_settings = settings
+            if pack_changed:
+                metadata = dict(record.resource_pack or {})
+                if "resource_pack_required" in fields:
+                    metadata["required"] = request.resource_pack_required
+                if "resource_pack_prompt" in fields:
+                    metadata["prompt"] = request.resource_pack_prompt or None
+                self._write_resource_pack_metadata(directory, metadata)
+                record.extra_metadata = {**record.extra_metadata, "resource_pack": metadata}
+            if paths:
+                record.content_sha256, _ = self.storage.tree_digest(directory)
+            session.commit()
+            return record
+        except Exception:
+            session.rollback()
+            for path, original in originals.items():
+                if original is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_bytes(original)
+            raise
+
     @staticmethod
     def _unwrap_single_root(staging: Path) -> None:
         children = list(staging.iterdir())
@@ -269,25 +316,26 @@ class MapService:
         resource_directory.mkdir(mode=0o750, exist_ok=True)
         target = resource_directory / RESOURCE_PACK_STORAGE_NAME
         shutil.copy2(resource_pack.path, target)
+        self._write_resource_pack_metadata(staging, metadata)
+        return metadata
+
+    @staticmethod
+    def _write_resource_pack_metadata(directory: Path, metadata: dict[str, object]) -> None:
         updates = {
             "resource-pack": str(metadata["url"]),
-            "resource-pack-sha1": resource_pack.sha1,
-            "require-resource-pack": str(resource_pack.required).lower(),
+            "resource-pack-sha1": str(metadata["sha1"]),
+            "require-resource-pack": str(metadata["required"]).lower(),
         }
-        if resource_pack.prompt:
-            updates["resource-pack-prompt"] = (
-                json.dumps(
-                    {"text": resource_pack.prompt},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).replace("\\", "\\\\")
-            )
-        update_server_properties(staging / "server.properties", updates)
-        (resource_directory / RESOURCE_PACK_METADATA_NAME).write_text(
-            json.dumps(metadata, ensure_ascii=False, sort_keys=True),
-            encoding="utf-8",
+        if metadata["prompt"]:
+            updates["resource-pack-prompt"] = json.dumps(
+                {"text": metadata["prompt"]}, ensure_ascii=False, separators=(",", ":")
+            ).replace("\\", "\\\\")
+        update_server_properties(
+            directory / "server.properties", updates, remove={"resource-pack-prompt"}
         )
-        return metadata
+        (directory / ".mc-manager-resources" / RESOURCE_PACK_METADATA_NAME).write_text(
+            json.dumps(metadata, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+        )
 
     def recover_resource_pack_metadata(
         self, map_id: int, map_directory: Path

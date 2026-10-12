@@ -42,6 +42,7 @@ RESERVED_SERVER_PROPERTIES = {
     "function-permission-level",
     "level-name",
     "op-permission-level",
+    "require-resource-pack",
     "server-port",
 }
 
@@ -132,6 +133,22 @@ class MapView(ApiModel):
     created_at: datetime
     resource_pack: ResourcePackView | None
     server_settings: ServerSettings
+
+
+class UpdateMapRequest(ApiModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    server_settings: ServerSettings | None = None
+    resource_pack_required: bool | None = None
+    resource_pack_prompt: str | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def reject_null_settings(self) -> Self:
+        for field_name in ("name", "server_settings", "resource_pack_required"):
+            if field_name in self.model_fields_set and getattr(self, field_name) is None:
+                raise ValueError(f"{field_name} 不能为 null")
+        return self
 
 
 class GameView(ApiModel):

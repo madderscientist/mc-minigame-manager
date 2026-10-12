@@ -4,9 +4,11 @@ import { computed, ref } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import { api, ApiError } from '../api/client'
+import type { MapRecord } from '../api/types'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import CreateGameDialog from '../components/CreateGameDialog.vue'
 import EmptyState from '../components/EmptyState.vue'
+import EditMapDialog from '../components/EditMapDialog.vue'
 import QueryError from '../components/QueryError.vue'
 import ServerSettingsSummary from '../components/ServerSettingsSummary.vue'
 import StatusBadge from '../components/StatusBadge.vue'
@@ -20,6 +22,17 @@ const related=computed(()=>gamesQuery.data.value?.filter((game)=>game.map_id===m
 const mapMissing=computed(()=>mapQuery.error.value instanceof ApiError&&mapQuery.error.value.status===404)
 const canCreate=computed(()=>mapQuery.data.value?.state==='ready')
 const canDelete=computed(()=>gamesQuery.isSuccess.value&&related.value.length===0)
+const editOpen = ref(false)
+
+async function mapSaved(map: MapRecord) {
+  queryClient.setQueryData(['map', mapId], map)
+  editOpen.value = false
+  toasts.push('地图已更新', map.name, 'success')
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['maps'] }),
+    queryClient.invalidateQueries({ queryKey: ['games'] }),
+  ])
+}
 
 async function removeMap(){
   if(!mapQuery.data.value||!canDelete.value||deleting.value)return
@@ -42,7 +55,7 @@ async function removeMap(){
   <div class="page detail-page">
     <div class="breadcrumb"><RouterLink to="/maps">地图</RouterLink><span>/</span><span>Map #{{ mapId }}</span></div>
     <template v-if="mapQuery.data.value">
-      <header class="detail-hero map-detail-hero"><div class="detail-symbol">▦</div><div class="detail-title"><div class="eyebrow">Immutable source map</div><h1>{{ mapQuery.data.value.name }}</h1><div class="detail-sub"><span>Map #{{ mapId }}</span><StatusBadge :label="mapQuery.data.value.state==='ready'?'可用':'不可用'" :tone="toneForStatus(mapQuery.data.value.state)" /></div></div><div class="header-actions"><button class="button primary" :disabled="!canCreate" :title="canCreate?'':'地图尚未准备完成'" @click="createOpen=true">＋ 从此地图创建游戏</button><button class="button ghost" :disabled="!canDelete" :title="canDelete?'删除此地图模板':'仍有游戏引用此模板'" @click="deleteOpen=true">删除模板</button></div></header>
+      <header class="detail-hero map-detail-hero"><div class="detail-symbol">▦</div><div class="detail-title"><div class="eyebrow">Map template</div><h1>{{ mapQuery.data.value.name }}</h1><div class="detail-sub"><span>Map #{{ mapId }}</span><StatusBadge :label="mapQuery.data.value.state==='ready'?'可用':'不可用'" :tone="toneForStatus(mapQuery.data.value.state)" /></div></div><div class="header-actions"><button class="button primary" :disabled="!canCreate" :title="canCreate?'':'地图尚未准备完成'" @click="createOpen=true">＋ 从此地图创建游戏</button><button class="button ghost" :disabled="!canCreate" @click="editOpen=true">编辑地图</button><button class="button ghost" :disabled="!canDelete" :title="canDelete?'删除此地图模板':'仍有游戏引用此模板'" @click="deleteOpen=true">删除模板</button></div></header>
       <section class="panel detail-facts"><div class="panel-heading"><div><span class="section-index">01</span><h2>运行环境</h2></div></div><dl class="fact-grid"><div><dt>来源</dt><dd>{{ mapQuery.data.value.source_type === 'generated' ? '自然生成模板' : '上传地图' }}</dd></div><div><dt>Minecraft</dt><dd>{{ mapQuery.data.value.mc_version }}</dd></div><div><dt>DataVersion</dt><dd>{{ mapQuery.data.value.data_version ?? (mapQuery.data.value.source_type === 'generated' ? '首次启动后生成' : '未识别') }}</dd></div><div><dt>Paper build</dt><dd>{{ mapQuery.data.value.paper_build }}</dd></div><div><dt>Java</dt><dd>Java {{ mapQuery.data.value.java_major }}</dd></div><div><dt>关联游戏</dt><dd>{{ related.length }}</dd></div></dl></section>
       <section class="panel"><div class="panel-heading"><div><span class="section-index">02</span><h2>默认服务端设置</h2></div><small>创建游戏时可以覆盖</small></div><ServerSettingsSummary :settings="mapQuery.data.value.server_settings" /></section>
       <section v-if="mapQuery.data.value.resource_pack" class="panel resource-pack-card">
@@ -55,6 +68,7 @@ async function removeMap(){
         <EmptyState v-else title="还没有游戏" description="从此地图创建一个独立、可反复启停的游戏。" icon="◆"><button class="button primary small" :disabled="!canCreate" @click="createOpen=true">创建游戏</button></EmptyState>
       </section>
       <CreateGameDialog :open="createOpen" :maps="[mapQuery.data.value]" :initial-map-id="mapId" @close="createOpen=false" @created="(id)=>router.push(`/games/${id}`)" />
+      <EditMapDialog :open="editOpen" :map="mapQuery.data.value" @close="editOpen=false" @saved="mapSaved" />
       <ConfirmDialog :open="deleteOpen" title="删除地图模板" :description="`将永久删除 ${mapQuery.data.value.name}。此操作不会保留模板文件。`" :confirm-text="mapQuery.data.value.name" confirm-label="永久删除" danger :busy="deleting" @close="deleteOpen=false" @confirm="removeMap" />
     </template>
     <EmptyState v-else-if="mapMissing" title="地图不存在" description="该地图可能已被删除。" icon="!" ><RouterLink class="button primary small" to="/maps">返回地图列表</RouterLink></EmptyState>
