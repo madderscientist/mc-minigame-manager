@@ -6,6 +6,13 @@ export default defineConfig({
   build: {
     outDir: '../src/mc_manager/static',
     emptyOutDir: true,
+    rolldownOptions: {
+      output: {
+        entryFileNames: 'assets/[name].js',
+        chunkFileNames: 'assets/[name].js',
+        assetFileNames: 'assets/[name][extname]',
+      },
+    },
   },
   server: {
     proxy: {

@@ -31,23 +31,8 @@ frpc_instance_unit() {
   systemd-escape --template=frpc@.service "$instance"
 }
 
-frontend_source_fingerprint=$(
-  cd "$SOURCE_DIR/frontend"
-  find \
-    index.html package.json package-lock.json vite.config.ts \
-    tsconfig.json tsconfig.app.json tsconfig.node.json src public \
-    -type f -print0 |
-    sort -z |
-    xargs -0 sha256sum |
-    sha256sum |
-    cut -d' ' -f1
-)
-frontend_build_fingerprint=$(cat \
-  "$SOURCE_DIR/src/mc_manager/static/.mc-manager-frontend-source.sha256" \
-  2>/dev/null || true)
-if [[ ! -s "$SOURCE_DIR/src/mc_manager/static/index.html" ]] || \
-  [[ $frontend_source_fingerprint != "$frontend_build_fingerprint" ]]; then
-  echo "前端构建产物缺失或已过期，请先运行: bash scripts/build-frontend.sh" >&2
+if [[ ! -s "$SOURCE_DIR/src/mc_manager/static/index.html" ]]; then
+  echo "前端构建产物缺失，请先运行: bash scripts/build-frontend.sh" >&2
   exit 1
 fi
 

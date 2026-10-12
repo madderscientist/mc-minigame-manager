@@ -5,7 +5,6 @@ SOURCE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 FRONTEND_DIR="$SOURCE_DIR/frontend"
 STATIC_ROOT="$SOURCE_DIR/src/mc_manager/static"
 STATIC_INDEX="$SOURCE_DIR/src/mc_manager/static/index.html"
-BUILD_FINGERPRINT_FILE="$STATIC_ROOT/.mc-manager-frontend-source.sha256"
 
 if ! command -v node >/dev/null 2>&1; then
   echo "未找到 Node.js，请先安装 Node.js 26。" >&2
@@ -32,16 +31,6 @@ if (( npm_major < 11 )); then
 fi
 
 cd "$FRONTEND_DIR"
-frontend_source_fingerprint=$(
-  find \
-    index.html package.json package-lock.json vite.config.ts \
-    tsconfig.json tsconfig.app.json tsconfig.node.json src public \
-    -type f -print0 |
-    sort -z |
-    xargs -0 sha256sum |
-    sha256sum |
-    cut -d' ' -f1
-)
 dependency_fingerprint=$(
   {
     sha256sum package.json package-lock.json
@@ -96,7 +85,5 @@ for (const reference of references) {
   }
 }
 NODE
-
-printf '%s\n' "$frontend_source_fingerprint" > "$BUILD_FINGERPRINT_FILE"
 
 echo "生产前端构建完成: $STATIC_INDEX"

@@ -146,6 +146,7 @@ async function submitUpload() {
       progress.value = value
       if (value >= 1) phase.value = 'validating'
     })
+    phase.value = 'idle'
     emit('added', result.map_id)
   } catch (reason) {
     error.value = reason instanceof ApiError && reason.code === 'upload_canceled'
@@ -170,6 +171,7 @@ async function submitGenerated() {
       paper_sha256: paperSha256.value.trim() || undefined,
       server_settings: generatedSettings.value,
     })
+    phase.value = 'idle'
     emit('added', result.map_id)
   } catch (reason) {
     error.value = reason instanceof ApiError ? reason.message : '地图模板创建失败'
